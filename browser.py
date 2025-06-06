@@ -2,9 +2,12 @@ import socket
 import ssl
 import os
 import tkinter
+import sys
+
+
 
 WIDTH, HEIGHT = 800, 600
-SCROLL_STEP = 100
+SCROLL_STEP = 200
 HSTEP, VSTEP = 13, 18
 
 class URL:
@@ -62,33 +65,97 @@ class URL:
 
 class Browser:
     def __init__(self):
+        self.width = WIDTH
+        self.height = HEIGHT
         self.window = tkinter.Tk()
         self.canvas = tkinter.Canvas(
             self.window, 
-            width=WIDTH,
-            height=HEIGHT
+            width=self.width,
+            height=self.height
         )
-        self.canvas.pack()
+        self.canvas.pack(fill=tkinter.BOTH, expand=True)
         self.scroll = 0
         self.window.bind("<Down>", self.scrolldown)
         self.window.bind("<Up>", self.scrollup)
+        self.window.bind("<MouseWheel>", self.scrollwheel)
+        self.window.bind("<Configure>", self.handle_resize)
+        self.display_list = []
+        self.text_content = "" 
+        # 用于resize防抖的计时器
+        self.resize_timer = None
+    def handle_resize(self, event):
+        """
+        FIX 1: 性能优化 (Debouncing)
+        当窗口变化时，取消上一个计时器并设置一个新的。
+        这可以确保真正的布局计算只在用户停止调整大小后执行一次。
+        """
+        if self.resize_timer:
+            self.window.after_cancel(self.resize_timer)
+        self.resize_timer = self.window.after(150, self.perform_layout) # 150毫秒延迟
+
+    def perform_layout(self):
+        """
+        这是真正执行重新布局和绘制的函数
+        """
+        # 使用winfo_width/height获取画布当前的的实际大小
+        new_width = self.canvas.winfo_width()
+        new_height = self.canvas.winfo_height()
+
+        if new_width == self.width and new_height == self.height:
+            return
+
+        self.width = new_width
+        self.height = new_height
+
+        if self.text_content:
+            self.display_list = self.layout(self.text_content)
+            self.draw()
+
+    def scrollwheel(self, e):
+        if sys.platform == "darwin": 
+            self.scroll -= e.delta
+        else: 
+            self.scroll -= int(e.delta / 120 * SCROLL_STEP) 
+        if self.scroll < 0: 
+            self.scroll = 0
+        self.draw()
     def scrolldown(self, e):
         self.scroll += SCROLL_STEP
         self.draw()
     def scrollup(self, e):
         self.scroll -= SCROLL_STEP
+        if self.scroll < 0: 
+            self.scroll = 0
         self.draw()
     def draw(self):
         self.canvas.delete("all")
         for x, y, c in self.display_list:
-            if y > self.scroll + HEIGHT: continue
-            if y + VSTEP < self.scroll: continue
+            if y > self.scroll + self.height: 
+                continue
+            if y + VSTEP < self.scroll: 
+                continue
             self.canvas.create_text(x, y - self.scroll, text=c)
     def load(self, url):
         body = url.request()
-        text = lex(body)
-        self.display_list = layout(text)
+        self.text_content = lex(body)
+        self.display_list = self.layout(self.text_content)
         self.draw()
+    def layout(self, text):
+        display_list = []
+        cursor_x, cursor_y = HSTEP, VSTEP
+        for c in text:
+            if c == "\n":
+                cursor_y += VSTEP
+                cursor_x = HSTEP
+                continue
+            if cursor_x >= self.width - HSTEP: 
+                cursor_y += VSTEP
+                cursor_x = HSTEP
+            display_list.append((cursor_x, cursor_y, c))
+            cursor_x += HSTEP
+            
+        return display_list  
+
 
 
 def parseHttp(url):
@@ -129,18 +196,7 @@ def lex(body):
             text += c
     return text
 
-def layout(text):
-    display_list = []
-    cursor_x, cursor_y = HSTEP, VSTEP
-    for c in text:
-        display_list.append((cursor_x, cursor_y, c))
-        cursor_x += HSTEP
-        if cursor_x >= WIDTH - HSTEP:
-            cursor_y += VSTEP
-            cursor_x = HSTEP
-        # ...
-    return display_list    
+
 if __name__ == "__main__":
-    import sys
     Browser().load(URL(sys.argv[1]))
     tkinter.mainloop()
