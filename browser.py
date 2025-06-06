@@ -8,20 +8,11 @@ class URL:
         self.scheme, url = url.split('://', 1)
         assert self.scheme in ["http", "https", "file"]
         if self.scheme == "http":
-            self.port = 80
-            self.host = getHostHttp(url)
-            self.path = getPathHttp(url)
-            self.port = getPortHttp(url)
-
+            self.host, self.port, self.path = parseHttp(url)
         elif self.scheme == "https":
-            self.port = 443
-            self.host = getHostHttp(url)
-            self.path = getPathHttp(url)
-            self.port = getPortHttps(url)
+            self.host, self.port, self.path = parseHttps(url)
         elif self.scheme == "file":
-            self.path = getPathFile(url)
-            self.host = None
-            self.port = None
+            self.host, self.port, self.path = parseFile(url)
          
     def request(self):
         if self.scheme == "file":
@@ -63,42 +54,30 @@ class URL:
         s.close()
         return content
 
-
-def getHostHttp(url):
+def parseHttp(url):
     if "/" not in url:
         url += "/"
-    host, url = url.split('/', 1)
+    host, path = url.split('/', 1)
     if ":" in host:
             host, port = host.split(":", 1)
-    return host
+    else:
+        port = 80
+    path = "/" + path
+    return host, port, path
 
-def getPortHttp(url):
+def parseHttps(url):
     if "/" not in url:
         url += "/"
-    host, url = url.split('/', 1)
+    host, path = url.split('/', 1)
     if ":" in host:
-        host, port = host.split(":", 1)
-        return port
-    return 80
+            host, port = host.split(":", 1)
+    else:
+        port = 443
+    path = "/" + path
+    return host, port, path
 
-def getPortHttps(url):
-    if "/" not in url:
-        url += "/"
-    host, url = url.split('/', 1)
-    if ":" in host:
-        host, port = host.split(":", 1)
-        return port
-    return 443
-        
-def getPathHttp(url):
-    if "/" not in url:
-        url += "/"
-    host, url = url.split('/', 1)
-    url = "/" + url
-    return url
-
-def getPathFile(url):
-    return url
+def parseFile(url):
+    return None, None, url
 
 
 def show(body):
