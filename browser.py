@@ -2,13 +2,14 @@ import socket
 import ssl
 import os
 import tkinter
-import sys
-
+import tkinter.font
 
 
 WIDTH, HEIGHT = 800, 600
-SCROLL_STEP = 200
+SCROLL_STEP = 100
 HSTEP, VSTEP = 13, 18
+FONTS = {}
+
 
 class URL:
     def __init__(self, url):
@@ -65,99 +66,123 @@ class URL:
 
 class Browser:
     def __init__(self):
-        self.width = WIDTH
-        self.height = HEIGHT
         self.window = tkinter.Tk()
         self.canvas = tkinter.Canvas(
             self.window, 
-            width=self.width,
-            height=self.height
+            width=WIDTH,
+            height=HEIGHT
         )
-        self.canvas.pack(fill=tkinter.BOTH, expand=True)
+        self.canvas.pack()
         self.scroll = 0
         self.window.bind("<Down>", self.scrolldown)
         self.window.bind("<Up>", self.scrollup)
-        self.window.bind("<MouseWheel>", self.scrollwheel)
-        self.window.bind("<Configure>", self.handle_resize)
-        self.display_list = []
-        self.text_content = "" 
-        # 用于resize防抖的计时器
-        self.resize_timer = None
-    def handle_resize(self, event):
-        """
-        FIX 1: 性能优化 (Debouncing)
-        当窗口变化时，取消上一个计时器并设置一个新的。
-        这可以确保真正的布局计算只在用户停止调整大小后执行一次。
-        """
-        if self.resize_timer:
-            self.window.after_cancel(self.resize_timer)
-        self.resize_timer = self.window.after(150, self.perform_layout) # 150毫秒延迟
-
-    def perform_layout(self):
-        """
-        这是真正执行重新布局和绘制的函数
-        """
-        # 使用winfo_width/height获取画布当前的的实际大小
-        new_width = self.canvas.winfo_width()
-        new_height = self.canvas.winfo_height()
-
-        if new_width == self.width and new_height == self.height:
-            return
-
-        self.width = new_width
-        self.height = new_height
-
-        if self.text_content:
-            self.display_list = self.layout(self.text_content)
-            self.draw()
-
-    def scrollwheel(self, e):
-        if sys.platform == "darwin": 
-            self.scroll -= e.delta
-        else: 
-            self.scroll -= int(e.delta / 120 * SCROLL_STEP) 
-        if self.scroll < 0: 
-            self.scroll = 0
-        self.draw()
     def scrolldown(self, e):
         self.scroll += SCROLL_STEP
         self.draw()
     def scrollup(self, e):
         self.scroll -= SCROLL_STEP
-        if self.scroll < 0: 
-            self.scroll = 0
         self.draw()
     def draw(self):
         self.canvas.delete("all")
-        for x, y, c in self.display_list:
-            if y > self.scroll + self.height: 
-                continue
-            if y + VSTEP < self.scroll: 
-                continue
-            self.canvas.create_text(x, y - self.scroll, text=c)
+        for x, y, word, font in self.display_list:
+            if y > self.scroll + HEIGHT: continue
+            if y + VSTEP < self.scroll: continue
+            self.canvas.create_text(x, y - self.scroll, text=word, font=font, anchor="nw")
     def load(self, url):
         body = url.request()
-        self.text_content = lex(body)
-        self.display_list = self.layout(self.text_content)
+        tokens = lex(body)
+        self.display_list = Layout(tokens).display_list
         self.draw()
-    def layout(self, text):
-        display_list = []
-        cursor_x, cursor_y = HSTEP, VSTEP
-        for c in text:
-            if c == "\n":
-                cursor_y += VSTEP
-                cursor_x = HSTEP
-                continue
-            if cursor_x >= self.width - HSTEP: 
-                cursor_y += VSTEP
-                cursor_x = HSTEP
-            display_list.append((cursor_x, cursor_y, c))
-            cursor_x += HSTEP
+
+class Text:
+    def __init__(self, text):
+        self.text = text
+
+class Tag:
+    def __init__(self, tag):
+        self.tag = tag
+
+class Layout:
+    '''
+    输入：
+        [
+            Tag('p'), 
+            Text('Hello '), 
+            Tag('b'), 
+            Text('world'), 
+            Tag('/b'), 
+            Text('!'), 
+            Tag('/p')
+        ]
+    输出：
+        [
+            (13, 18, 'Hello', <tkinter.font.Font object at ...>),  # 使用 normal weight, roman style
+            (x_world, 18, 'world', <tkinter.font.Font object at ...>), # 使用 bold weight, roman style
+            (x_bang, 18, '!', <tkinter.font.Font object at ...>)    # 使用 normal weight, roman style
+        ]
+    '''
+    def __init__(self, tokens):
+        self.display_list = []
+        self.cursor_x = HSTEP
+        self.cursor_y = VSTEP
+        self.weight = "normal"
+        self.style = "roman"
+        self.size = 12
+        self.line = []
+        for tok in tokens:
+            self.token(tok)
+        self.flush()
+        
+    def token(self, tok):
+        if isinstance(tok, Text):
+            for word in tok.text.split():
+                self.word(word)
+        elif tok.tag == "i":
+            self.style = "italic"
+        elif tok.tag == "/i":
+            self.style = "roman"
+        elif tok.tag == "b":
+            self.weight = "bold"
+        elif tok.tag == "/b":
+            self.weight = "normal"
+        elif tok.tag == "br":
+            self.flush()
+        elif tok.tag == "/p":
+            self.flush()
+            self.cursor_y += VSTEP
+        elif tok.tag == "small":
+            self.size -= 2
+        elif tok.tag == "/small":
+            self.size += 2
+        elif tok.tag == "big":
+            self.size += 4
+        elif tok.tag == "/big":
+            self.size -= 4
+    def word(self, word): 
+        font = get_font(self.size, self.weight, self.style)
+        w = font.measure(word)
+         # 完成一行后，处理 line 缓冲区
+        if self.cursor_x + w > WIDTH - HSTEP:
+            self.flush()
             
-        return display_list  
+        if self.cursor_x + w > WIDTH - HSTEP:
+            self.cursor_y += font.metrics("linespace") * 1.25
+            self.cursor_x = HSTEP
+        self.line.append((self.cursor_x, word, font))
+        self.cursor_x += w + font.measure(" ")
+    def flush(self):
+        if not self.line: return
+        metrics = [font.metrics() for x, word, font in self.line]
+        max_ascent = max([metric["ascent"] for metric in metrics])
+        baseline = self.cursor_y + 1.25 * max_ascent
+        for x, word, font in self.line:
+            y = baseline - font.metrics("ascent")
+            self.display_list.append((x, y, word, font))
+        self.cursor_y += font.metrics("linespace") * 1.25
+        self.cursor_x = HSTEP
+        self.line = []
 
-
-
+        
 def parseHttp(url):
     if "/" not in url:
         url += "/"
@@ -185,18 +210,51 @@ def parseFile(url):
 
 
 def lex(body):
-    text = ""
+    '''
+    输入：<p>Hello <b>world</b>!</p>
+    输出：
+        [
+            Tag('p'), 
+            Text('Hello '), 
+            Tag('b'), 
+            Text('world'), 
+            Tag('/b'), 
+            Text('!'), 
+            Tag('/p')
+        ]
+    '''
+    out = []
+    buffer = ""
     in_tag = False
     for c in body:
         if c == "<":
             in_tag = True
+            if buffer: out.append(Text(buffer))
+            buffer = ""
         elif c == ">":
             in_tag = False
-        elif not in_tag:
-            text += c
-    return text
+            out.append(Tag(buffer))
+            buffer = ""
+        else:
+            buffer += c
+    if not in_tag and buffer:
+        out.append(Text(buffer))
+
+    return out
+
+  
+
+def get_font(size, weight, style):
+    key = (size, weight, style)
+    if key not in FONTS:
+        font = tkinter.font.Font(size=size, weight=weight,
+            slant=style)
+        label = tkinter.Label(font=font)
+        FONTS[key] = (font, label)
+    return FONTS[key][0]
 
 
 if __name__ == "__main__":
+    import sys
     Browser().load(URL(sys.argv[1]))
     tkinter.mainloop()
