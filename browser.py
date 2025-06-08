@@ -3,6 +3,7 @@ import ssl
 import os
 import tkinter
 import tkinter.font
+import sys
 
 
 WIDTH, HEIGHT = 800, 600
@@ -90,38 +91,156 @@ class Browser:
             self.canvas.create_text(x, y - self.scroll, text=word, font=font, anchor="nw")
     def load(self, url):
         body = url.request()
-        tokens = lex(body)
-        self.display_list = Layout(tokens).display_list
+        self.nodes = HTMLParser(body).parse()
+        self.display_list = Layout(self.nodes).display_list
         self.draw()
 
 class Text:
-    def __init__(self, text):
+    '''
+        文本节点的创建、插入到树中
+    '''
+    def __init__(self, text, parent):
         self.text = text
+        self.children = []
+        self.parent = parent
+    def __repr__(self):
+        return repr(self.text)
 
-class Tag:
-    def __init__(self, tag):
+
+class Element:
+    '''
+        元素节点的创建、插入到树中
+    '''
+    def __init__(self, tag, attributes, parent):
         self.tag = tag
+        self.attributes = attributes
+        self.children = []
+        self.parent = parent
+    def __repr__(self):
+        return "<" + self.tag + ">"
+
+
+class HTMLParser:
+    '''
+        构建 HTML 树
+    '''
+    def __init__(self, body):
+        self.body = body
+        self.unfinished = [] # 未完成的 node 栈（文本、元素）
+        self.HEAD_TAGS = [
+            "base", "basefont", "bgsound", "noscript",
+            "link", "meta", "title", "style", "script",
+        ]
+        self.SELF_CLOSING_TAGS = [
+            "area", "base", "br", "col", "embed", "hr", "img", "input",
+            "link", "meta", "param", "source", "track", "wbr",
+        ]
+
+    def parse(self):
+        '''
+            解析 HTML
+        '''
+        text = ""
+        in_tag = False
+        for c in self.body:
+            if c == "<":
+                # <p>1</p> <p>2</p>
+                # 运行到 2 的 <p> 的 < 时
+                # add_text(1)
+                in_tag = True
+                if text: self.add_text(text) 
+                text = ""
+            elif c == ">":
+                # <p>1</p>
+                # 运行到 1 的 > 时
+                # add_tag(p)
+                in_tag = False
+                self.add_tag(text)
+                text = ""
+            else:
+                # <p>1</p>
+                # 运行到 1 时, text = 1
+                # 运行到 p 时, text = p
+                text += c
+        if not in_tag and text:
+            self.add_text(text)
+        return self.finish()
+    def add_text(self, text):
+        '''
+            添加文本节点, 将其作为最后一个未完成节点的子节点
+        '''
+        if text.isspace(): return
+        self.implicit_tags(None)
+        parent = self.unfinished[-1]
+        node = Text(text, parent)
+        parent.children.append(node)
+    def add_tag(self, tag):
+        '''
+            添加元素节点
+        '''
+        tag, attributes = self.get_attributes(tag)
+        if tag.startswith("!"): return
+        self.implicit_tags(tag)
+        if tag.startswith("/"):
+            if len(self.unfinished) == 1: return
+            node = self.unfinished.pop()
+            parent = self.unfinished[-1]
+            parent.children.append(node)
+        elif tag in self.SELF_CLOSING_TAGS:
+            parent = self.unfinished[-1]
+            node = Element(tag, attributes, parent)
+            parent.children.append(node)
+        else:
+            parent = self.unfinished[-1] if self.unfinished else None
+            node = Element(tag, attributes,parent)
+            self.unfinished.append(node)
+    def finish(self):
+        '''
+            处理未完成的节点
+        '''
+        if not self.unfinished:
+            self.implicit_tags(None)
+        while len(self.unfinished) > 1:
+            node = self.unfinished.pop()
+            parent = self.unfinished[-1]
+            parent.children.append(node)
+        return self.unfinished.pop()
+    def get_attributes(self, text):
+        '''
+            解析属性
+        '''
+        parts = text.split()
+        tag = parts[0].casefold()
+        attributes = {}
+        for attrpair in parts[1:]:
+            if "=" in attrpair:
+                key, value = attrpair.split("=", 1)
+                if len(value) > 2 and value[0] in ["'", "\""]:
+                    value = value[1:-1]
+                attributes[key.casefold()] = value
+            else:
+                attributes[attrpair.casefold()] = ""
+        return tag, attributes
+    def implicit_tags(self, tag):
+        while True:
+            open_tags = [node.tag for node in self.unfinished]    
+            if open_tags == [] and tag != "html":
+                self.add_tag("html")
+            elif open_tags == ["html"] \
+                and tag not in ["head", "body", "/html"]:
+                if tag in self.HEAD_TAGS:
+                    self.add_tag("head")
+                else:
+                    self.add_tag("body")
+            elif open_tags == ["html", "head"] and \
+                tag not in ["/head"] + self.HEAD_TAGS:
+                self.add_tag("/head")
+            else:
+                break
+
 
 class Layout:
-    '''
-    输入：
-        [
-            Tag('p'), 
-            Text('Hello '), 
-            Tag('b'), 
-            Text('world'), 
-            Tag('/b'), 
-            Text('!'), 
-            Tag('/p')
-        ]
-    输出：
-        [
-            (13, 18, 'Hello', <tkinter.font.Font object at ...>),  # 使用 normal weight, roman style
-            (x_world, 18, 'world', <tkinter.font.Font object at ...>), # 使用 bold weight, roman style
-            (x_bang, 18, '!', <tkinter.font.Font object at ...>)    # 使用 normal weight, roman style
-        ]
-    '''
-    def __init__(self, tokens):
+    def __init__(self, tree):
         self.display_list = []
         self.cursor_x = HSTEP
         self.cursor_y = VSTEP
@@ -129,35 +248,9 @@ class Layout:
         self.style = "roman"
         self.size = 12
         self.line = []
-        for tok in tokens:
-            self.token(tok)
+        self.recurse(tree)
         self.flush()
         
-    def token(self, tok):
-        if isinstance(tok, Text):
-            for word in tok.text.split():
-                self.word(word)
-        elif tok.tag == "i":
-            self.style = "italic"
-        elif tok.tag == "/i":
-            self.style = "roman"
-        elif tok.tag == "b":
-            self.weight = "bold"
-        elif tok.tag == "/b":
-            self.weight = "normal"
-        elif tok.tag == "br":
-            self.flush()
-        elif tok.tag == "/p":
-            self.flush()
-            self.cursor_y += VSTEP
-        elif tok.tag == "small":
-            self.size -= 2
-        elif tok.tag == "/small":
-            self.size += 2
-        elif tok.tag == "big":
-            self.size += 4
-        elif tok.tag == "/big":
-            self.size -= 4
     def word(self, word): 
         font = get_font(self.size, self.weight, self.style)
         w = font.measure(word)
@@ -181,6 +274,41 @@ class Layout:
         self.cursor_y += font.metrics("linespace") * 1.25
         self.cursor_x = HSTEP
         self.line = []
+    def open_tag(self, tag):
+        if tag == "i":
+            self.style = "italic"
+        elif tag == "b":
+            self.weight = "bold"
+        elif tag == "br":
+            self.flush()
+        elif tag == "small":
+            self.size -= 2
+        elif tag == "big":
+            self.size += 4
+
+    def close_tag(self, tag):
+        if tag == "i":
+            self.style = "roman"
+        elif tag == "b":
+            self.weight = "normal"
+        elif tag == "p":
+            self.flush()
+            self.cursor_y += VSTEP
+        elif tag == "small":
+            self.size += 2
+        elif tag == "/big":
+            self.size -= 4
+            
+    def recurse(self, tree):
+        if isinstance(tree, Text):
+            for word in tree.text.split():
+                self.word(word)
+        else:
+            self.open_tag(tree.tag)
+            for child in tree.children:
+                self.recurse(child)
+            self.close_tag(tree.tag)
+  
 
         
 def parseHttp(url):
@@ -209,41 +337,6 @@ def parseFile(url):
     return None, None, url
 
 
-def lex(body):
-    '''
-    输入：<p>Hello <b>world</b>!</p>
-    输出：
-        [
-            Tag('p'), 
-            Text('Hello '), 
-            Tag('b'), 
-            Text('world'), 
-            Tag('/b'), 
-            Text('!'), 
-            Tag('/p')
-        ]
-    '''
-    out = []
-    buffer = ""
-    in_tag = False
-    for c in body:
-        if c == "<":
-            in_tag = True
-            if buffer: out.append(Text(buffer))
-            buffer = ""
-        elif c == ">":
-            in_tag = False
-            out.append(Tag(buffer))
-            buffer = ""
-        else:
-            buffer += c
-    if not in_tag and buffer:
-        out.append(Text(buffer))
-
-    return out
-
-  
-
 def get_font(size, weight, style):
     key = (size, weight, style)
     if key not in FONTS:
@@ -253,8 +346,14 @@ def get_font(size, weight, style):
         FONTS[key] = (font, label)
     return FONTS[key][0]
 
+def print_tree(node, indent=0):
+    print(" " * indent, node)
+    for child in node.children:
+        print_tree(child, indent + 2)
 
 if __name__ == "__main__":
-    import sys
+    # body = URL(sys.argv[1]).request()
+    # nodes = HTMLParser(body).parse()
+    # print_tree(nodes)
     Browser().load(URL(sys.argv[1]))
     tkinter.mainloop()
