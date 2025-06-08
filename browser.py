@@ -123,6 +123,15 @@ class Element:
 class HTMLParser:
     '''
         构建 HTML 树
+        输入：<p>Hello <b>world</b>!</p>
+        输出：
+            <Element html>
+                <Element body>
+                    <Element p>
+                    <Text 'Hello '>
+                    <Element b>
+                        <Text 'world'>
+                    <Text '!'>
     '''
     def __init__(self, body):
         self.body = body
@@ -240,6 +249,15 @@ class HTMLParser:
 
 
 class Layout:
+    '''
+        输出：
+        [
+            (13, y1, 'Hello', <tkinter.font.Font object at ...normal...>),  # (x, y, 'word', font)
+            (x_after_hello, y1, 'world', <tkinter.font.Font object at ...bold...>),
+            (x_after_world, y1, '!', <tkinter.font.Font object at ...normal...>)
+        ]
+  
+    '''
     def __init__(self, tree):
         self.display_list = []
         self.cursor_x = HSTEP
