@@ -282,10 +282,12 @@ class Browser:
             cmd.execute(self.scroll, self.canvas)
     def load(self, url):
         body = url.request()
+        
+        # 第1次遍历：生成 node tree
         self.nodes = HTMLParser(body).parse()
         
+        # 获取 css 文件
         rules = DEFAULT_STYLE_SHEET.copy()
-        
         links = [node.attributes["href"]
                  for node in tree_to_list(self.nodes, [])
                  if isinstance(node, Element)
@@ -300,12 +302,17 @@ class Browser:
                 continue
             rules.extend(CSSParser(body).parse())
             
+        # 第2次遍历：生成 style tree
         style(self.nodes, sorted(rules, key=cascade_priority))
+        
+        # 第3次遍历：生成 layout tree
         self.document = DocumentLayout(self.nodes)
         self.document.layout()
         
+        # 第4次遍历：生成绘制列表 (Painting)
         self.display_list = []
         paint_tree(self.document, self.display_list)
+        
         self.draw()
 
 class Text:
