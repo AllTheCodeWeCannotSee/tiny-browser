@@ -33,6 +33,7 @@ INHERITED_PROPERTIES = {
     "color": "black",
 }
 
+
 class URL:
     def __init__(self, url):
         # http://example.org/index.html
@@ -61,6 +62,9 @@ class URL:
                        ":" + str(self.port) + url)
            
     def request(self):
+        # Added for specific HTML content loading
+        if self.path == "/specific_document.html":
+            return HTML_FOR_STRUCTURE_PRINT
         if self.scheme == "file":
             try:
                 with open(self.path, 'r', encoding='utf8') as f:
@@ -314,6 +318,52 @@ class Browser:
         paint_tree(self.document, self.display_list)
         
         self.draw()
+    def _print_layout_node_details(self, layout_node, indent_str=""):
+        node_type_name = type(layout_node).__name__
+        
+        node_description = ""
+        if hasattr(layout_node, 'node') and layout_node.node:
+            if isinstance(layout_node.node, Element):
+                node_description = f"关联节点 (Associated Node): Element <{layout_node.node.tag}>"
+            elif isinstance(layout_node.node, Text):
+                text_preview = layout_node.node.text.strip()
+                if len(text_preview) > 30:
+                    text_preview = text_preview[:27] + "..."
+                node_description = f"关联节点 (Associated Node): Text \"{text_preview}\""
+            else: # Should not happen for DocumentLayout/BlockLayout with current structure
+                node_description = f"关联节点 (Associated Node): {type(layout_node.node).__name__}"
+        
+        print(f"{indent_str}{node_type_name} [{node_description}]")
+        
+        attrs_to_print = {
+            "x": "x 坐标", "y": "y 坐标", 
+            "width": "宽度 (width)", "height": "高度 (height)"
+        }
+        for attr_name, attr_desc in attrs_to_print.items():
+            if hasattr(layout_node, attr_name):
+                value = getattr(layout_node, attr_name)
+                # Only print if not None, as some might be None initially or not applicable
+                if value is not None:
+                    print(f"{indent_str}  {attr_desc}: {value}")
+
+        if isinstance(layout_node, BlockLayout):
+            mode = layout_node.layout_mode()
+            print(f"{indent_str}  布局模式 (Layout Mode): {mode}")
+            if mode == "inline":
+                print(f"{indent_str}  行内元素数量 (Inline items in display_list): {len(layout_node.display_list)}")
+
+        for child in layout_node.children:
+            self._print_layout_node_details(child, indent_str + "  ")
+
+    def print_document_layout_structure(self):
+        if not hasattr(self, 'document') or not self.document:
+            print("文档布局 (Document layout) 尚未生成。请先加载一个 URL。")
+            return
+    
+        print("\n--- 文档布局树结构 (Document Layout Tree Structure) ---")
+        self._print_layout_node_details(self.document)
+        print("--- 结束文档布局树结构 (End of Document Layout Tree Structure) ---\n")
+
 
 class Text:
     '''
@@ -587,7 +637,7 @@ class BlockLayout:
             for child in node.children:
                 self.recurse(child)
     
-    def word(self,node, word): 
+    def word(self, node, word): 
         color = node.style["color"]
         weight = node.style["font-weight"]
         style = node.style["font-style"]
@@ -597,12 +647,32 @@ class BlockLayout:
         
         font = get_font(size, weight, style)
         w = font.measure(word)
-         # 完成一行后，处理 line 缓冲区
+        
         if self.cursor_x + w > self.width:
+            # 如果到达行尾，处理 line 缓冲区
             self.flush() 
-        else:
-            self.line.append((self.cursor_x, word, font, color))
+        self.line.append((self.cursor_x, word, font, color))
         self.cursor_x += w + font.measure(" ")
+
+class LineLayout:
+    def __init__(self, node, parent, previous):
+        self.node = node
+        self.parent = parent
+        self.previous = previous
+        self.children = []
+        
+class TextLayout:
+    def __init__(self, node, word, parent, previous):
+        self.node = node
+        self.word = word
+        self.parent = parent
+        self.previous = previous
+        self.children = []
+        
+
+        
+
+
 class DrawText:
     def __init__(self, x1, y1, text, font, color):
         self.top = y1
@@ -634,6 +704,8 @@ class DrawRect:
             self.right, self.bottom - scroll,
             width=0,
             fill=self.color)
+
+
 
 def paint_tree(layout_object, display_list):
     display_list.extend(layout_object.paint())
@@ -679,9 +751,21 @@ def print_tree(node, indent=0):
     for child in node.children:
         print_tree(child, indent + 2)
 
+HTML_FOR_STRUCTURE_PRINT = """
+<html>
+  <body>
+    <h1>A Blue Headline</h1>
+    <p>Some text and a <span>italic</span> word.</p>
+  </body>
+</html>
+"""
+
 if __name__ == "__main__":
-    # body = URL(sys.argv[1]).request()
-    # nodes = HTMLParser(body).parse()
-    # print_tree(nodes)
+    
+    
     Browser().load(URL(sys.argv[1]))
     tkinter.mainloop()
+    # browser = Browser()
+    # browser.load(URL("file:///specific_document.html"))
+    # browser.print_document_layout_structure()
+    
