@@ -35,6 +35,13 @@ INHERITED_PROPERTIES = {
 
 
 class URL:
+    def __str__(self):
+        port_part = ":" + str(self.port)
+        if self.scheme == "https" and self.port == 443:
+            port_part = ""
+        if self.scheme == "http" and self.port == 80:
+            port_part = ""
+        return self.scheme + "://" + self.host + port_part + self.path
     def __init__(self, url):
         # http://example.org/index.html
         self.scheme, url = url.split('://', 1)
@@ -62,9 +69,6 @@ class URL:
                        ":" + str(self.port) + url)
            
     def request(self):
-        # Added for specific HTML content loading
-        if self.path == "/specific_document.html":
-            return HTML_FOR_STRUCTURE_PRINT
         if self.scheme == "file":
             try:
                 with open(self.path, 'r', encoding='utf8') as f:
@@ -258,6 +262,197 @@ def tree_to_list(tree, list):
 
 DEFAULT_STYLE_SHEET = CSSParser(open("browser.css").read()).parse()
 
+
+
+class Rect:
+    def __init__(self, left, top, right, bottom):
+        self.left = left
+        self.top = top
+        self.right = right
+        self.bottom = bottom
+    def contains_point(self, x, y):
+        return x >= self.left and x < self.right \
+            and y >= self.top and y < self.bottom 
+
+class DrawLine:
+    def __init__(self, x1, y1, x2, y2, color, thickness):
+        self.rect = Rect(x1, y1, x2, y2)
+        self.color = color
+        self.thickness = thickness
+
+    def execute(self, scroll, canvas):
+        canvas.create_line(
+            self.rect.left, self.rect.top - scroll,
+            self.rect.right, self.rect.bottom - scroll,
+            fill=self.color, width=self.thickness)
+
+
+class DrawOutline:
+    def __init__(self, rect, color, thickness):
+        self.rect = rect
+        self.color = color
+        self.thickness = thickness
+    def execute(self, scroll, canvas):
+        canvas.create_rectangle(
+            self.rect.left, self.rect.top - scroll,
+            self.rect.right, self.rect.bottom - scroll,
+            outline=self.color,
+            width=self.thickness
+        )
+        
+
+class Chrome:
+    '''
+        浏览器上的工具栏，除了显示的网页外的内容
+    '''
+    def __init__(self, browser):
+        self.browser = browser
+        self.font = get_font(20, "normal", "roman")
+        self.font_height = self.font.metrics("linespace")
+        
+        self.padding = 5
+        self.tabbar_top = 0
+        self.tabbar_bottom = self.font_height + 2*self.padding
+        
+        self.bottom = self.tabbar_bottom
+        
+        self.focus = None
+        self.address_bar = ""
+        
+        # Button: + 
+        plus_width = self.font.measure("+") + 2*self.padding
+        self.newtab_rect = Rect(
+            self.padding,
+            self.padding,
+            self.padding + plus_width,
+            self.padding + self.font_height
+        )
+        
+        # 地址栏
+        self.urlbar_top = self.tabbar_bottom
+        self.urlbar_bottom = self.urlbar_top + self.font_height + 2*self.padding
+        self.bottom = self.urlbar_bottom
+        
+        # 后退按钮 <
+        back_width = self.font.measure("<") + 2*self.padding
+        self.back_rect = Rect(
+            self.padding,
+            self.urlbar_top + self.padding,
+            self.padding + back_width,
+            self.urlbar_bottom - self.padding)
+        
+        # 地址栏
+        self.address_rect = Rect(
+            self.back_rect.top + self.padding,
+            self.urlbar_top + self.padding,
+            WIDTH - self.padding,
+            self.urlbar_bottom - self.padding)
+    def keypress(self, char):
+        if self.focus == "address bar":
+            self.address_bar += char  
+    def enter(self):
+        if self.focus == "address bar":
+            self.browser.active_tab.load(URL(self.address_bar))
+            self.focus = None
+    
+    def click(self, x, y):
+        self.focus = None
+        
+        if self.newtab_rect.contains_point(x, y):
+            self.browser.new_tab(URL("https://browser.engineering/"))
+        elif self.back_rect.contains_point(x, y):
+            self.browser.active_tab.go_back()
+        elif self.address_rect.contains_point(x, y):
+            self.focus = "address bar"
+            self.address_bar = ""
+        else:
+            for i, tab in enumerate(self.browser.tabs):
+                if self.tab_rect(i).contains_point(x, y):
+                    self.browser.active_tab = tab
+                    break
+
+    def tab_rect(self, i):
+        tabs_start = self.newtab_rect.right + self.padding
+        tab_width =self.font.measure("Tab X") + 2*self.padding
+        return Rect(
+            tabs_start + tab_width * i, self.tabbar_top,
+            tabs_start + tab_width * (i + 1), self.tabbar_bottom)
+    def paint(self):
+        cmds = []
+        
+        # 绘制白色矩形
+        cmds.append(DrawRect(Rect(0, 0, WIDTH, self.bottom), "white"))
+        
+        # 界面底部的分割线
+        cmds.append(DrawLine(0, self.bottom, WIDTH, self.bottom, "black", 1))
+        
+        # 绘制 +
+        cmds.append(DrawOutline(self.newtab_rect, "black", 1))
+        cmds.append(
+            DrawText(self.newtab_rect.left + self.padding,
+                     self.newtab_rect.top,
+                     "+",
+                     self.font,"black"))
+        
+        # 绘制 Tabs
+        for i, tab in enumerate(self.browser.tabs):
+            bounds = self.tab_rect(i)
+            cmds.append(DrawLine(
+                bounds.left, 0, bounds.left, bounds.bottom,
+                "black", 1))
+            cmds.append(DrawLine(
+                bounds.right, 0, bounds.right, bounds.bottom,
+                "black", 1))
+            cmds.append(DrawText(
+                bounds.left + self.padding, bounds.top + self.padding,
+                "Tab {}".format(i), self.font, "black"))
+            
+        # 突出显示活动页
+        if tab == self.browser.active_tab:
+            cmds.append(DrawLine(
+                0, bounds.bottom, bounds.left, bounds.bottom,
+                "black", 1))
+            cmds.append(DrawLine(
+                bounds.right, bounds.bottom, WIDTH, bounds.bottom,
+                "black", 1))
+        
+
+         
+        # 绘制后退按钮
+        cmds.append(DrawOutline(self.back_rect, "black", 1))
+        cmds.append(DrawText(
+            self.back_rect.left + self.padding,
+            self.back_rect.top,
+            "<", self.font, "black"))      
+    
+        # 绘制地址栏
+        cmds.append(DrawOutline(self.address_rect, "black", 1))          
+        
+        # 地址栏成为焦点时  
+        if self.focus == "address bar":
+            cmds.append(DrawText(
+                self.address_rect.left + self.padding,
+                self.address_rect.top,
+                self.address_bar, self.font, "black"))
+            
+            # 光标
+            w = self.font.measure(self.address_bar)
+            cmds.append(DrawLine(
+                self.address_rect.left + self.padding + w,
+                self.address_rect.top,
+                self.address_rect.left + self.padding + w,
+                self.address_rect.bottom,
+                "red", 1))
+        else:
+            url = str(self.browser.active_tab.url)
+            cmds.append(DrawText(
+                self.address_rect.left + self.padding,
+                self.address_rect.top,
+                url, self.font, "black"))
+            
+        return cmds
+
+
 class Browser:
     def __init__(self):
         self.tabs = []
@@ -275,10 +470,25 @@ class Browser:
         self.window.bind("<Down>", self.handle_down)
         self.window.bind("<Up>", self.handle_up)
         self.window.bind("<Button-1>", self.handle_click)
+        self.window.bind("<Key>", self.handle_key)
+        self.window.bind("<Return>", self.handle_enter)
+        
+        self.chrome = Chrome(self)
+        
     def draw(self):
         self.canvas.delete("all")
-        self.active_tab.draw(self.canvas)
-    
+        self.active_tab.draw(self.canvas, self.chrome.bottom)
+        for cmd in self.chrome.paint():
+            cmd.execute(0, self.canvas)
+    def handle_enter(self, e):
+        self.chrome.enter()
+        self.draw()
+    def handle_key(self, e):
+        if len(e.char) == 0: return
+        if not (0x20 <= ord(e.char) < 0x7f): return
+        self.chrome.keypress(e.char)
+        self.draw()
+        
     def handle_down(self, e):
         self.active_tab.scrolldown()
         self.draw()
@@ -286,10 +496,14 @@ class Browser:
         self.active_tab.scrollup()
         self.draw()
     def handle_click(self, e):
-        self.active_tab.click(e.x, e.y)
+        if e.y < self.chrome.bottom:
+            self.chrome.click(e.x, e.y)
+        else:
+            tab_y = e.y - self.chrome.bottom
+            self.active_tab.click(e.x, tab_y)
         self.draw()
     def new_tab(self, url):
-        new_tab = Tab()
+        new_tab = Tab(HEIGHT - self.chrome.bottom)
         new_tab.load(url)
         self.active_tab = new_tab
         self.tabs.append(new_tab)
@@ -298,9 +512,19 @@ class Browser:
 
 
 class Tab:
-    def __init__(self):
+    def __init__(self, tab_height):
         self.scroll = 0
         self.url = None
+        self.tab_height = tab_height
+        
+        # 存储浏览历史
+        self.history = []
+    def go_back(self):
+        if len(self.history) > 1:
+            self.history.pop()
+            back = self.history.pop()
+            self.load(back)
+
         
     def click(self, x, y):
         '''
@@ -329,18 +553,20 @@ class Tab:
             elt = elt.parent
         
     def scrolldown(self):
-        max_y = max(self.document.height + 2*VSTEP - HEIGHT, 0)
+        max_y = max(self.document.height + 2*VSTEP - self.tab_height, 0)
         self.scroll = min(self.scroll + SCROLL_STEP, max_y)
 
     def scrollup(self):
         self.scroll -= SCROLL_STEP
 
-    def draw(self, canvas):
+    def draw(self, canvas, offset):
         for cmd in self.display_list:
-            if cmd.top > self.scroll + HEIGHT: continue
-            if cmd.bottom < self.scroll: continue
-            cmd.execute(self.scroll, canvas)
+            if cmd.rect.top > self.scroll + self.tab_height: continue
+            if cmd.rect.bottom < self.scroll: continue
+            cmd.execute(self.scroll - offset, canvas)
     def load(self, url):
+        # 历史记录
+        self.history.append(url)
         self.url = url
         body = url.request()
         
@@ -374,51 +600,7 @@ class Tab:
         self.display_list = []
         paint_tree(self.document, self.display_list)
         
-    def _print_layout_node_details(self, layout_node, indent_str=""):
-        node_type_name = type(layout_node).__name__
-        
-        node_description = ""
-        if hasattr(layout_node, 'node') and layout_node.node:
-            if isinstance(layout_node.node, Element):
-                node_description = f"关联节点 (Associated Node): Element <{layout_node.node.tag}>"
-            elif isinstance(layout_node.node, Text):
-                text_preview = layout_node.node.text.strip()
-                if len(text_preview) > 30:
-                    text_preview = text_preview[:27] + "..."
-                node_description = f"关联节点 (Associated Node): Text \"{text_preview}\""
-            else: # Should not happen for DocumentLayout/BlockLayout with current structure
-                node_description = f"关联节点 (Associated Node): {type(layout_node.node).__name__}"
-        
-        print(f"{indent_str}{node_type_name} [{node_description}]")
-        
-        attrs_to_print = {
-            "x": "x 坐标", "y": "y 坐标", 
-            "width": "宽度 (width)", "height": "高度 (height)"
-        }
-        for attr_name, attr_desc in attrs_to_print.items():
-            if hasattr(layout_node, attr_name):
-                value = getattr(layout_node, attr_name)
-                # Only print if not None, as some might be None initially or not applicable
-                if value is not None:
-                    print(f"{indent_str}  {attr_desc}: {value}")
-
-        if isinstance(layout_node, BlockLayout):
-            mode = layout_node.layout_mode()
-            print(f"{indent_str}  布局模式 (Layout Mode): {mode}")
-            if mode == "inline":
-                print(f"{indent_str}  行内元素数量 (Inline items in display_list): {len(layout_node.display_list)}")
-
-        for child in layout_node.children:
-            self._print_layout_node_details(child, indent_str + "  ")
-
-    def print_document_layout_structure(self):
-        if not hasattr(self, 'document') or not self.document:
-            print("文档布局 (Document layout) 尚未生成。请先加载一个 URL。")
-            return
     
-        print("\n--- 文档布局树结构 (Document Layout Tree Structure) ---")
-        self._print_layout_node_details(self.document)
-        print("--- 结束文档布局树结构 (End of Document Layout Tree Structure) ---\n")
 
 
 class Text:
@@ -607,6 +789,8 @@ class BlockLayout:
         self.height = None
         self.display_list = []
 
+    def self_rect(self):
+        return Rect(self.x, self.y, self.x + self.width, self.y + self.height)
         
     def layout_mode(self):
         if isinstance(self.node, Text):
@@ -653,15 +837,19 @@ class BlockLayout:
         cmds = []
         bgcolor = self.node.style.get("background-color",
                                       "transparent")
+        
         if bgcolor != "transparent":
-            x2, y2 = self.x + self.width, self.y + self.height
-            rect = DrawRect(self.x, self.y, x2, y2, bgcolor)
+            rect = DrawRect(self.self_rect(), bgcolor)
             cmds.append(rect)
 
-        
         if self.layout_mode() == "inline":
             for x, y, word, font, color in self.display_list:
                 cmds.append(DrawText(x, y, word, font, color))
+        
+        if bgcolor != "transparent":
+            rect = DrawRect(self.self_rect(), bgcolor)
+            cmds.append(rect)
+            
         return cmds
         
     def flush(self):
@@ -807,33 +995,28 @@ class TextLayout:
 
 class DrawText:
     def __init__(self, x1, y1, text, font, color):
-        self.top = y1
-        self.left = x1
+        self.rect = Rect(x1, y1,
+            x1 + font.measure(text), y1 + font.metrics("linespace"))
         self.text = text
         self.font = font
         self.color = color
-        self.bottom = y1 + font.metrics("linespace")
 
     def execute(self, scroll, canvas):
         canvas.create_text(
-            self.left, self.top - scroll,
+            self.rect.left, self.rect.top - scroll,
             text=self.text,
             font=self.font,
             anchor='nw',
-            fill=self.color
-            )
+            fill=self.color)
     
 class DrawRect:
-    def __init__(self, x1, y1, x2, y2, color):
-        self.top = y1
-        self.left = x1
-        self.bottom = y2
-        self.right = x2
+    def __init__(self, rect, color):
+        self.rect = rect
         self.color = color
     def execute(self, scroll, canvas):
         canvas.create_rectangle(
-            self.left, self.top - scroll,
-            self.right, self.bottom - scroll,
+            self.rect.left, self.rect.top - scroll,
+            self.rect.right, self.rect.bottom - scroll,
             width=0,
             fill=self.color)
 
@@ -883,14 +1066,6 @@ def print_tree(node, indent=0):
     for child in node.children:
         print_tree(child, indent + 2)
 
-HTML_FOR_STRUCTURE_PRINT = """
-<html>
-  <body>
-    <h1>A Blue Headline</h1>
-    <p>Some text and a <span>italic</span> word.</p>
-  </body>
-</html>
-"""
 
 if __name__ == "__main__":
     Browser().new_tab(URL(sys.argv[1]))
@@ -899,7 +1074,5 @@ if __name__ == "__main__":
     # Browser().load(URL(sys.argv[1]))
     # tkinter.mainloop()
     
-    # browser = Browser()
-    # browser.load(URL("file:///specific_document.html"))
-    # browser.print_document_layout_structure()
+
     
