@@ -260,6 +260,9 @@ DEFAULT_STYLE_SHEET = CSSParser(open("browser.css").read()).parse()
 
 class Browser:
     def __init__(self):
+        self.tabs = []
+        self.active_tab = None
+        
         self.window = tkinter.Tk()
         self.canvas = tkinter.Canvas(
             self.window, 
@@ -268,23 +271,77 @@ class Browser:
             bg="white"
         )
         self.canvas.pack()
-        self.scroll = 0
-        self.window.bind("<Down>", self.scrolldown)
-        self.window.bind("<Up>", self.scrollup)
-    def scrolldown(self, e):
-        max_y = max(self.document.height + 2*VSTEP - HEIGHT, 0)
-        self.scroll = min(self.scroll + SCROLL_STEP, max_y)
-        self.draw()
-    def scrollup(self, e):
-        self.scroll -= SCROLL_STEP
-        self.draw()
+        
+        self.window.bind("<Down>", self.handle_down)
+        self.window.bind("<Up>", self.handle_up)
+        self.window.bind("<Button-1>", self.handle_click)
     def draw(self):
         self.canvas.delete("all")
+        self.active_tab.draw(self.canvas)
+    
+    def handle_down(self, e):
+        self.active_tab.scrolldown()
+        self.draw()
+    def handle_up(self, e):
+        self.active_tab.scrollup()
+        self.draw()
+    def handle_click(self, e):
+        self.active_tab.click(e.x, e.y)
+        self.draw()
+    def new_tab(self, url):
+        new_tab = Tab()
+        new_tab.load(url)
+        self.active_tab = new_tab
+        self.tabs.append(new_tab)
+        self.draw()
+        
+
+
+class Tab:
+    def __init__(self):
+        self.scroll = 0
+        self.url = None
+        
+    def click(self, x, y):
+        '''
+            渲染是从元素到布局对象，再到页面坐标，最后到屏幕坐标；
+            而点击处理则相反，从屏幕坐标开始，转换为页面坐标，布局对象，最后是元素
+        '''
+        # 屏幕坐标 x, y
+        
+        # 页面坐标
+        y += self.scroll
+        
+        # 页面坐标转换为布局对象
+        objs = [obj for obj in tree_to_list(self.document, [])
+                if obj.x <= x <obj.x + obj.width
+                and obj.y <= y < obj.y + obj.height]
+        if not objs: return 
+        elt = objs[-1].node # 在坐标范围内的，布局树的最下层的布局对象对应的 styled node tree 的 node
+        
+        # 向上遍历，找到链接元素
+        while elt:
+            if isinstance (elt, Text):
+                pass
+            elif elt.tag == "a" and "href" in elt.attributes:
+                url = self.url.resolve(elt.attributes["href"])
+                return self.load(url)
+            elt = elt.parent
+        
+    def scrolldown(self):
+        max_y = max(self.document.height + 2*VSTEP - HEIGHT, 0)
+        self.scroll = min(self.scroll + SCROLL_STEP, max_y)
+
+    def scrollup(self):
+        self.scroll -= SCROLL_STEP
+
+    def draw(self, canvas):
         for cmd in self.display_list:
             if cmd.top > self.scroll + HEIGHT: continue
             if cmd.bottom < self.scroll: continue
-            cmd.execute(self.scroll, self.canvas)
+            cmd.execute(self.scroll, canvas)
     def load(self, url):
+        self.url = url
         body = url.request()
         
         # 第1次遍历：生成 node tree
@@ -317,7 +374,6 @@ class Browser:
         self.display_list = []
         paint_tree(self.document, self.display_list)
         
-        self.draw()
     def _print_layout_node_details(self, layout_node, indent_str=""):
         node_type_name = type(layout_node).__name__
         
@@ -526,6 +582,8 @@ class BlockLayout:
         self.node = node
         self.parent = parent
         self.previous = previous
+        
+        # 存放 LineLayout 对象
         self.children = []
         
         # 元素框左上角的 x 坐标。
@@ -548,6 +606,7 @@ class BlockLayout:
         #   在 "block" 模式下，它是所有子元素高度的总和。
         self.height = None
         self.display_list = []
+
         
     def layout_mode(self):
         if isinstance(self.node, Text):
@@ -581,22 +640,14 @@ class BlockLayout:
                 previous = next
         else:
             # inline
-            self.cursor_x = 0
-            self.cursor_y = 0
-            self.weight = "normal"
-            self.style = "roman"
-            self.size = 12
-            
-            self.line = []
+            self.new_line()
             self.recurse(self.node)
-            self.flush()
             
         for child in self.children:
             child.layout()
-        if mode == "block":
-            self.height = sum([child.height for child in self.children])
-        else:
-            self.height = self.cursor_y
+            
+        self.height = sum([child.height for child in self.children])
+
             
     def paint(self):
         cmds = []
@@ -628,16 +679,27 @@ class BlockLayout:
         self.cursor_y = baseline + 1.25 * max_descent
             
     def recurse(self, node):
+        '''
+            node: inline node
+        '''
         if isinstance(node, Text):
             for word in node.text.split():
                 self.word(node, word)
         else:
             if node.tag == "br":
-                self.flush()
+                self.new_line()
             for child in node.children:
                 self.recurse(child)
     
     def word(self, node, word): 
+        '''
+            作用：就像一个打字员在排版
+                它拿到一个单词，看看当前行还够不够地方放下它。如果不够，就另起一行。
+                然后，把这个单词“写”在当前行的末尾，并把笔向右移动相应的距离，准备写下一个字
+            self.children: 一个个 LineLayout 实例
+            node: TextNode
+            word: str
+        '''
         color = node.style["color"]
         weight = node.style["font-weight"]
         style = node.style["font-style"]
@@ -650,9 +712,20 @@ class BlockLayout:
         
         if self.cursor_x + w > self.width:
             # 如果到达行尾，处理 line 缓冲区
-            self.flush() 
-        self.line.append((self.cursor_x, word, font, color))
+            self.new_line()
+            
+        line = self.children[-1]
+        previous_word = line.children[-1] if line.children else None
+        text = TextLayout(node, word, line, previous_word)
+        line.children.append(text)
+        
         self.cursor_x += w + font.measure(" ")
+    def new_line(self):
+        self.cursor_x = 0
+        last_line = self.children[-1] if self.children else None
+        new_line = LineLayout(self.node, self, last_line)
+        self.children.append(new_line)
+        
 
 class LineLayout:
     def __init__(self, node, parent, previous):
@@ -661,6 +734,37 @@ class LineLayout:
         self.previous = previous
         self.children = []
         
+        self.x = None
+        self.y = None
+        self.width = None
+        self.height = None  
+    def layout(self):
+        self.width = self.parent.width
+        self.x = self.parent.x
+
+        if self.previous:
+            self.y = self.previous.y + self.previous.height
+        else:
+            self.y = self.parent.y
+
+        for word in self.children:
+            word.layout()
+
+        if not self.children:
+            self.height = 0
+            return
+
+        max_ascent = max([word.font.metrics("ascent") 
+                          for word in self.children])
+        baseline = self.y + 1.25 * max_ascent
+        for word in self.children:
+            word.y = baseline - word.font.metrics("ascent")
+        max_descent = max([word.font.metrics("descent")
+                           for word in self.children])
+        self.height = 1.25 * (max_ascent + max_descent)
+    def paint(self):
+        return []
+        
 class TextLayout:
     def __init__(self, node, word, parent, previous):
         self.node = node
@@ -668,6 +772,34 @@ class TextLayout:
         self.parent = parent
         self.previous = previous
         self.children = []
+        
+        self.x = None
+        self.y = None
+        self.width = None
+        self.height = None
+        self.font = None
+
+    def layout(self):
+        weight = self.node.style["font-weight"]
+        style = self.node.style["font-style"]
+        if style == "normal": style = "roman"
+        size = int(float(self.node.style["font-size"][:-2]) * .75)
+        self.font = get_font(size, weight, style)
+        
+        self.width = self.font.measure(self.word)
+
+        if self.previous:
+            space = self.previous.font.measure(" ")
+            self.x = self.previous.x + space + self.previous.width
+        else:
+            self.x = self.parent.x
+
+        self.height = self.font.metrics("linespace")
+    def paint(self):
+        color = self.node.style["color"]
+        return [DrawText(self.x, self.y, self.word, self.font, color)]
+
+        
         
 
         
@@ -732,7 +864,7 @@ def parseHttps(url):
     else:
         port = 443
     path = "/" + path
-    return host, port, path
+    return host, int(port), path
 
 def parseFile(url):
     return None, None, url
@@ -761,10 +893,12 @@ HTML_FOR_STRUCTURE_PRINT = """
 """
 
 if __name__ == "__main__":
-    
-    
-    Browser().load(URL(sys.argv[1]))
+    Browser().new_tab(URL(sys.argv[1]))
     tkinter.mainloop()
+    
+    # Browser().load(URL(sys.argv[1]))
+    # tkinter.mainloop()
+    
     # browser = Browser()
     # browser.load(URL("file:///specific_document.html"))
     # browser.print_document_layout_structure()
