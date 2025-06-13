@@ -264,6 +264,7 @@ DEFAULT_STYLE_SHEET = CSSParser(open("browser.css").read()).parse()
 
 
 
+
 class Rect:
     def __init__(self, left, top, right, bottom):
         self.left = left
@@ -285,7 +286,6 @@ class DrawLine:
             self.rect.left, self.rect.top - scroll,
             self.rect.right, self.rect.bottom - scroll,
             fill=self.color, width=self.thickness)
-
 
 class DrawOutline:
     def __init__(self, rect, color, thickness):
@@ -347,9 +347,16 @@ class Chrome:
             self.urlbar_top + self.padding,
             WIDTH - self.padding,
             self.urlbar_bottom - self.padding)
+    
+    def blur(self):
+        self.focus = None
+    
     def keypress(self, char):
         if self.focus == "address bar":
             self.address_bar += char  
+            return True
+        return False
+    
     def enter(self):
         if self.focus == "address bar":
             self.browser.active_tab.load(URL(self.address_bar))
@@ -452,11 +459,15 @@ class Chrome:
             
         return cmds
 
-
 class Browser:
+    '''
+        管理键盘事件（Tab管理鼠标）
+    '''
     def __init__(self):
+        
         self.tabs = []
         self.active_tab = None
+        self.focus = None
         
         self.window = tkinter.Tk()
         self.canvas = tkinter.Canvas(
@@ -480,25 +491,39 @@ class Browser:
         self.active_tab.draw(self.canvas, self.chrome.bottom)
         for cmd in self.chrome.paint():
             cmd.execute(0, self.canvas)
+    
     def handle_enter(self, e):
         self.chrome.enter()
         self.draw()
+        
     def handle_key(self, e):
         if len(e.char) == 0: return
         if not (0x20 <= ord(e.char) < 0x7f): return
-        self.chrome.keypress(e.char)
-        self.draw()
+        
+        if self.chrome.keypress(e.char):
+            self.draw()
+        elif self.focus == "content":
+            self.active_tab.keypress(e.char)
+            self.draw()
+        
+        
         
     def handle_down(self, e):
         self.active_tab.scrolldown()
         self.draw()
+        
     def handle_up(self, e):
         self.active_tab.scrollup()
         self.draw()
+        
     def handle_click(self, e):
         if e.y < self.chrome.bottom:
+            self.focus = None
             self.chrome.click(e.x, e.y)
         else:
+            self.focus = "content"
+            self.chrome.blur()
+            
             tab_y = e.y - self.chrome.bottom
             self.active_tab.click(e.x, tab_y)
         self.draw()
@@ -509,8 +534,6 @@ class Browser:
         self.tabs.append(new_tab)
         self.draw()
         
-
-
 class Tab:
     def __init__(self, tab_height):
         self.scroll = 0
@@ -519,18 +542,31 @@ class Tab:
         
         # 存储浏览历史
         self.history = []
+        
+        # foucs node
+        self.focus = None
+        
     def go_back(self):
         if len(self.history) > 1:
             self.history.pop()
             back = self.history.pop()
             self.load(back)
 
-        
+    def keypress(self, char):
+        if self.focus:
+            self.focus.attributes["value"] += char
+            self.render()
+
+    # 处理点击，包含点击链接    
     def click(self, x, y):
         '''
             渲染是从元素到布局对象，再到页面坐标，最后到屏幕坐标；
             而点击处理则相反，从屏幕坐标开始，转换为页面坐标，布局对象，最后是元素
         '''
+        if self.focus:
+            self.focus.is_focused = False
+        self.focus = None
+        
         # 屏幕坐标 x, y
         
         # 页面坐标
@@ -543,14 +579,25 @@ class Tab:
         if not objs: return 
         elt = objs[-1].node # 在坐标范围内的，布局树的最下层的布局对象对应的 styled node tree 的 node
         
-        # 向上遍历，找到链接元素
+        # 向上遍历
         while elt:
             if isinstance (elt, Text):
                 pass
+            
+            # 处理：链接
             elif elt.tag == "a" and "href" in elt.attributes:
                 url = self.url.resolve(elt.attributes["href"])
                 return self.load(url)
+            # 处理：输入框
+            elif elt.tag == "input":
+                self.focus = elt
+                elt.attributes["value"] = ""
+                self.focus = elt
+                elt.is_focused = True
+                return self.render()
             elt = elt.parent
+        
+        self.render()
         
     def scrolldown(self):
         max_y = max(self.document.height + 2*VSTEP - self.tab_height, 0)
@@ -574,7 +621,7 @@ class Tab:
         self.nodes = HTMLParser(body).parse()
         
         # 获取 css 文件
-        rules = DEFAULT_STYLE_SHEET.copy()
+        self.rules = DEFAULT_STYLE_SHEET.copy()
         links = [node.attributes["href"]
                  for node in tree_to_list(self.nodes, [])
                  if isinstance(node, Element)
@@ -587,10 +634,14 @@ class Tab:
                 body = style_url.request()
             except:
                 continue
-            rules.extend(CSSParser(body).parse())
-            
+            self.rules.extend(CSSParser(body).parse())
+        
+        # 将原本[加载页面, 样式计算, 布局, 绘制, 显示] 中的 [样式计算, 布局, 绘制, 显示] 放到 render()
+        self.render()
+        
+    def render(self):
         # 第2次遍历：生成 style tree
-        style(self.nodes, sorted(rules, key=cascade_priority))
+        style(self.nodes, sorted(self.rules, key=cascade_priority))
         
         # 第3次遍历：生成 layout tree
         self.document = DocumentLayout(self.nodes)
@@ -600,9 +651,6 @@ class Tab:
         self.display_list = []
         paint_tree(self.document, self.display_list)
         
-    
-
-
 class Text:
     '''
         文本节点的创建、插入到树中
@@ -611,6 +659,9 @@ class Text:
         self.text = text
         self.children = []
         self.parent = parent
+        
+        self.is_focused = False
+
     def __repr__(self):
         return repr(self.text)
 
@@ -623,6 +674,9 @@ class Element:
         self.attributes = attributes
         self.children = []
         self.parent = parent
+        
+        self.is_focused = False
+        
     def __repr__(self):
         return "<" + self.tag + ">"
 
@@ -756,6 +810,9 @@ class DocumentLayout:
     def paint(self):
         return []
 
+    def should_paint(self):
+        return True
+
 class BlockLayout:
     '''
         块级元素的布局对象
@@ -789,6 +846,10 @@ class BlockLayout:
         self.height = None
         self.display_list = []
 
+    def should_paint(self):
+        return isinstance(self.node, Text) or \
+            (self.node.tag != "input" and self.node.tag !=  "button")
+    
     def self_rect(self):
         return Rect(self.x, self.y, self.x + self.width, self.y + self.height)
         
@@ -799,7 +860,7 @@ class BlockLayout:
                   child.tag in BLOCK_ELEMENTS
                   for child in self.node.children]):
             return "block"
-        elif self.node.children:
+        elif self.node.children or self.node.tag == "input":
             return "inline"
         else:
             return "block"
@@ -869,6 +930,9 @@ class BlockLayout:
     def recurse(self, node):
         '''
             node: inline node
+            例子：
+                输入：hello <p>world</p>
+                流程：self.word(hello), self.word(world)
         '''
         if isinstance(node, Text):
             for word in node.text.split():
@@ -876,8 +940,30 @@ class BlockLayout:
         else:
             if node.tag == "br":
                 self.new_line()
-            for child in node.children:
-                self.recurse(child)
+            
+            elif node.tag == "input" or node.tag == "button":
+                self.input(node)
+            
+            else:
+                for child in node.children:
+                    self.recurse(child)
+        
+    def input(self, node):
+        w = INPUT_WIDTH_PX
+        if self.cursor_x + w > self.width:
+            self.new_line()
+        line = self.children[-1]
+        previous_word = line.children[-1] if line.children else None
+        input = InputLayout(node, line, previous_word)
+        line.children.append(input)
+
+        weight = node.style["font-weight"]
+        style = node.style["font-style"]
+        if style == "normal": style = "roman"
+        size = int(float(node.style["font-size"][:-2]) * .75)
+        font = get_font(size, weight, style)
+
+        self.cursor_x += w + font.measure(" ")
     
     def word(self, node, word): 
         '''
@@ -913,7 +999,7 @@ class BlockLayout:
         last_line = self.children[-1] if self.children else None
         new_line = LineLayout(self.node, self, last_line)
         self.children.append(new_line)
-        
+       
 
 class LineLayout:
     def __init__(self, node, parent, previous):
@@ -926,6 +1012,8 @@ class LineLayout:
         self.y = None
         self.width = None
         self.height = None  
+    def should_paint(self):
+        return True
     def layout(self):
         self.width = self.parent.width
         self.x = self.parent.x
@@ -967,6 +1055,9 @@ class TextLayout:
         self.height = None
         self.font = None
 
+    def should_paint(self):
+        return True
+    
     def layout(self):
         weight = self.node.style["font-weight"]
         style = self.node.style["font-style"]
@@ -988,8 +1079,77 @@ class TextLayout:
         return [DrawText(self.x, self.y, self.word, self.font, color)]
 
         
+INPUT_WIDTH_PX = 200
+class InputLayout:
+    def __init__(self, node, parent, previous):
+        self.node = node
+        self.parent = parent
+        self.previous = previous
+        self.children = []
         
+        self.x = None
+        self.y = None
+        self.width = None
+        self.height = None
+        self.font = None
+     
+    def should_paint(self):
+        return True
+       
+    def layout(self):
+        weight = self.node.style["font-weight"]
+        style = self.node.style["font-style"]
+        if style == "normal": style = "roman"
+        size = int(float(self.node.style["font-size"][:-2]) * .75)
+        self.font = get_font(size, weight, style)
+        
+        self.width = INPUT_WIDTH_PX
 
+        if self.previous:
+            space = self.previous.font.measure(" ")
+            self.x = self.previous.x + space + self.previous.width
+        else:
+            self.x = self.parent.x
+
+        self.height = self.font.metrics("linespace")
+    
+    def self_rect(self):
+        return Rect(self.x, self.y, self.x + self.width, self.y + self.height) 
+    
+    def paint(self):
+        cmds = []
+        bgcolor = self.node.style.get("background-color", "transparent")
+        
+        # 绘制背景
+        if bgcolor != "transparent":
+            rect = DrawRect(self.self_rect(), bgcolor)
+            cmds.append(rect)
+        
+        # 获取输入框中的文本/按钮的文本
+        if self.node.tag == "input":
+            text = self.node.attributes.get("value", "")
+        elif self.node.tag == "button":
+            if len(self.node.children) == 1 and \
+               isinstance(self.node.children[0], Text):
+                text = self.node.children[0].text
+            else:
+                print("Ignoring HTML contents inside button")
+                text = ""
+        
+        # 绘制输入框中的文本/按钮的文本、
+        color = self.node.style["color"]
+        cmds.append(DrawText(self.x, self.y, text, self.font, color))
+
+        # 绘制焦点
+        if self.node.is_focused:
+            cx = self.x + self.font.measure(text)
+            cmds.append(DrawLine(
+                cx, self.y, cx, self.y + self.height, "black", 1))
+        
+        return cmds
+        
+        
+        
         
 
 
@@ -1021,11 +1181,11 @@ class DrawRect:
             fill=self.color)
 
 
-
 def paint_tree(layout_object, display_list):
-    display_list.extend(layout_object.paint())
-    for child in layout_object.children:
-        paint_tree(child, display_list)
+    if layout_object.should_paint():
+        display_list.extend(layout_object.paint())
+        for child in layout_object.children:
+            paint_tree(child, display_list)
         
 def parseHttp(url):
     if "/" not in url:

@@ -21,3 +21,16 @@ big {
 h1 {
   font-size: 200%;
 }
+
+input {
+  font-size: 16px;
+  font-weight: normal;
+  font-style: normal;
+  background-color: lightblue;
+}
+button {
+  font-size: 16px;
+  font-weight: normal;
+  font-style: normal;
+  background-color: orange;
+}
