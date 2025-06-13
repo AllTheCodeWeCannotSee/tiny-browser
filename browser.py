@@ -4,7 +4,7 @@ import os
 import tkinter
 import tkinter.font
 import sys
-
+import urllib.parse
 
 WIDTH, HEIGHT = 800, 600
 SCROLL_STEP = 100
@@ -68,7 +68,7 @@ class URL:
             return URL(self.scheme + "://" + self.host + \
                        ":" + str(self.port) + url)
            
-    def request(self):
+    def request(self, payload=None):
         if self.scheme == "file":
             try:
                 with open(self.path, 'r', encoding='utf8') as f:
@@ -82,20 +82,29 @@ class URL:
             proto=socket.IPPROTO_TCP,
             )
         s.connect((self.host, self.port))
+        
         if self.scheme == "https":
             ctx = ssl.create_default_context()
             s = ctx.wrap_socket(s, server_hostname=self.host)
-        request = "GET {} HTTP/1.1\r\n".format(self.path)
+            
+        method = "POST" if payload else "GET"
+        request = "{} {} HTTP/1.0\r\n".format(method, self.path)
+        
+        if payload:
+            length = len(payload.encode("utf8"))
+            request += "Content-Length: {}\r\n".format(length)
+        
         request += "Host: {}\r\n".format(self.host)
-        request += "Connection: close\r\n"
-        request += "User-Agent: tiny-browser\r\n"
         request += "\r\n"
+        
+        if payload: request += payload
         
         s.send(request.encode("utf8"))
         
         response = s.makefile("r", encoding="utf8", newline="\r\n")
         statusline = response.readline()
         version, status, explanation = statusline.split(" ", 2)
+        
         response_headers = {}
         while True:
             line = response.readline()
@@ -104,6 +113,7 @@ class URL:
             response_headers[header.casefold()] = value.strip()
         assert "transfer-encoding" not in response_headers
         assert "content-encoding" not in response_headers
+        
         content = response.read()
         s.close()
         return content
@@ -537,7 +547,7 @@ class Browser:
 class Tab:
     def __init__(self, tab_height):
         self.scroll = 0
-        self.url = None
+        self.url = None # URL对象
         self.tab_height = tab_height
         
         # 存储浏览历史
@@ -595,9 +605,36 @@ class Tab:
                 self.focus = elt
                 elt.is_focused = True
                 return self.render()
+            elif elt.tag == "button":
+                while elt:
+                    if elt.tag == "form" and "action" in elt.attributes:
+                        return self.submit_form(elt)
+                    elt = elt.parent
+            
             elt = elt.parent
         
         self.render()
+      
+    def submit_form(self, elt):
+        inputs = [node for node in tree_to_list(elt, [])
+                  if isinstance(node, Element)
+                  and node.tag == "input"
+                  and "name" in node.attributes]
+        body = ""
+        # &k1=v1&k2=v2&k3=v3
+        for input in inputs:
+            name = input.attributes["name"]
+            value = input.attributes.get("value", "")
+            
+            name = urllib.parse.quote(name)
+            value = urllib.parse.quote(value)
+            
+            body += "&" + name + "=" + value
+        # k1=v1&k2=v2&k3=v3
+        body = body[1:]
+        
+        url = self.url.resolve(elt.attributes["action"])
+        self.load(url, body)
         
     def scrolldown(self):
         max_y = max(self.document.height + 2*VSTEP - self.tab_height, 0)
@@ -611,11 +648,11 @@ class Tab:
             if cmd.rect.top > self.scroll + self.tab_height: continue
             if cmd.rect.bottom < self.scroll: continue
             cmd.execute(self.scroll - offset, canvas)
-    def load(self, url):
+    def load(self, url, payload=None):
         # 历史记录
         self.history.append(url)
         self.url = url
-        body = url.request()
+        body = url.request(payload)
         
         # 第1次遍历：生成 node tree
         self.nodes = HTMLParser(body).parse()
