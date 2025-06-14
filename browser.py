@@ -53,7 +53,11 @@ class URL:
             self.host, self.port, self.path = parseHttps(url)
         elif self.scheme == "file":
             self.host, self.port, self.path = parseFile(url)
-      
+    
+    # 同源策略 协议+主机+端口 
+    def origin(self):
+        return self.scheme + "://" + self.host + ":" + str(self.port)
+    
     
     def resolve(self, url):
         '''
@@ -73,7 +77,7 @@ class URL:
             return URL(self.scheme + "://" + self.host + \
                        ":" + str(self.port) + url)
            
-    def request(self, payload=None):
+    def request(self, referrer, payload=None):
         if self.scheme == "file":
             try:
                 with open(self.path, 'r', encoding='utf8') as f:
@@ -81,19 +85,34 @@ class URL:
             except Exception as e:
                 return "<html><body><h1>Error Reading File</h1><p>Could not read file {}: {}</p></body></html>".format(self.path, e)
 
+        # 建立tcp
         s = socket.socket(
             family=socket.AF_INET,
             type=socket.SOCK_STREAM,
             proto=socket.IPPROTO_TCP,
             )
         s.connect((self.host, self.port))
-        
         if self.scheme == "https":
             ctx = ssl.create_default_context()
             s = ctx.wrap_socket(s, server_hostname=self.host)
             
+        # ----构建请求头----
         method = "POST" if payload else "GET"
         request = "{} {} HTTP/1.0\r\n".format(method, self.path)
+        
+        
+        
+        # 同站cookie
+        if self.host in COOKIE_JAR:
+            cookie, params = COOKIE_JAR[self.host]
+            request += "Cookie: {}\r\n".format(cookie)
+            allow_cookie = True
+            if referrer and params.get("samesite", "none") == "lax":
+                if method != "GET":
+                    allow_cookie = self.host == referrer.host
+            if allow_cookie:
+                request += "Cookie: {}\r\n".format(cookie)
+        
         
         if payload:
             length = len(payload.encode("utf8"))
@@ -104,24 +123,51 @@ class URL:
         
         if payload: request += payload
         
+        # ----发送请求----
         s.send(request.encode("utf8"))
         
+        
+        # ----接收响应----
         response = s.makefile("r", encoding="utf8", newline="\r\n")
         statusline = response.readline()
         version, status, explanation = statusline.split(" ", 2)
         
+        # 读 headers
         response_headers = {}
         while True:
             line = response.readline()
             if line == "\r\n": break
             header, value = line.split(":", 1)
             response_headers[header.casefold()] = value.strip()
+            
+        # 同站cookie 
+        #   例子：Set-Cookie: session_id=abc123xyz; Path=/; Expires=Wed, 21 Oct 2025 07:28:00 GMT; HttpOnly
+        #   结果：("session_id=abc123xyz", {"path": "/", "expires": "wed, 21 oct 2025 07:28:00 gmt", "httponly": "true"})
+
+        if "set-cookie" in response_headers:
+            cookie = response_headers["set-cookie"]
+            params = {}
+            if ";" in cookie:
+                cookie, rest = cookie.split(";", 1)
+                for param in rest.split(";"):
+                    if '=' in param:
+                        param, value = param.split("=", 1)
+                    else:
+                        value = "true"
+                    params[param.strip().casefold()] = value.casefold()
+            COOKIE_JAR[self.host] = (cookie, params)
+        
+            
+            
+        
         assert "transfer-encoding" not in response_headers
         assert "content-encoding" not in response_headers
         
         content = response.read()
         s.close()
-        return content
+        return response_headers, content
+
+COOKIE_JAR = {}
 
 class CSSParser:
     def __init__(self,s):
@@ -560,7 +606,11 @@ class Tab:
         
         # foucs node
         self.focus = None
-        
+      
+    def allowed_request(self, url):
+        return self.allowed_origins == None or \
+            url.origin() in self.allowed_origins
+              
     def go_back(self):
         if len(self.history) > 1:
             self.history.pop()
@@ -659,10 +709,24 @@ class Tab:
             if cmd.rect.bottom < self.scroll: continue
             cmd.execute(self.scroll - offset, canvas)
     def load(self, url, payload=None):
+        '''
+            url: 要访问的新URL
+            self.url: 请求来源页面的 URL
+        '''
         # 历史记录
         self.history.append(url)
         self.url = url
-        body = url.request(payload)
+        headers, body = url.request(self.url, payload)
+        
+        # 仅加载来自资源列表的资源
+        self.allowed_origins = None
+        if "content-security-policy" in headers:
+           csp = headers["content-security-policy"].split()
+           if len(csp) > 0 and csp[0] == "default-src":
+                self.allowed_origins = []
+                for origin in csp[1:]:
+                    self.allowed_origins.append(URL(origin).origin())
+        
         
         # 第1次遍历：生成 node tree
         self.nodes = HTMLParser(body).parse()
@@ -677,8 +741,14 @@ class Tab:
                    and "src" in node.attributes]
         for script in scripts:
             script_url = url.resolve(script)
+            
+            # 是否在资源列表
+            if not self.allowed_request(script_url):
+                print("Blocked script", script, "due to CSP")
+                continue
+            
             try:
-                body = script_url.request()
+                header, body = script_url.request(url)
             except:
                 continue
             self.js.run(script, body)
@@ -695,7 +765,7 @@ class Tab:
         for link in links:
             style_url = url.resolve(link)
             try:
-                body = style_url.request()
+                header, body = style_url.request(url)
             except:
                 continue
             self.rules.extend(CSSParser(body).parse())
@@ -734,9 +804,24 @@ class JSContext:
         self.interp.export_function("querySelectorAll", self.querySelectorAll)
         self.interp.export_function("getAttribute", self.getAttribute)
         self.interp.export_function("innerHTML_set", self.innerHTML_set)
+        self.interp.export_function("XMLHttpRequest_send", self.XMLHttpRequest_send)
         
         self.interp.evaljs(RUNTIME_JS)
     
+    def XMLHttpRequest_send(self, method, url, body):
+        full_url = self.tab.url.resolve(url)
+        
+        # 同源策略
+        if not self.tab.allowed_request(full_url):
+            raise Exception("Cross-origin XHR blocked by CSP")
+        headers, out = full_url.request(self.tab.url, body)
+        
+        # 同源策略
+        if full_url.origin() != self.tab.url.origin():
+            raise Exception("Cross-origin XHR request not allowed")
+        
+        return out
+     
     def innerHTML_set(self, handle, s):
         """
         在 Python 端设置由句柄标识的 DOM 元素的 innerHTML。
