@@ -5,6 +5,7 @@ import tkinter
 import tkinter.font
 import sys
 import urllib.parse
+import dukpy
 
 WIDTH, HEIGHT = 800, 600
 SCROLL_STEP = 100
@@ -53,7 +54,11 @@ class URL:
         elif self.scheme == "file":
             self.host, self.port, self.path = parseFile(url)
       
+    
     def resolve(self, url):
+        '''
+            处理相对路径
+        '''
         if "://" in url: return URL(url)
         if not url.startswith("/"):
             dir, _ = self.path.rsplit("/", 1)
@@ -564,6 +569,7 @@ class Tab:
 
     def keypress(self, char):
         if self.focus:
+            if self.js.dispatch_event("keydown", self.focus): return
             self.focus.attributes["value"] += char
             self.render()
 
@@ -596,16 +602,19 @@ class Tab:
             
             # 处理：链接
             elif elt.tag == "a" and "href" in elt.attributes:
+                if self.js.dispatch_event("click", elt): return
                 url = self.url.resolve(elt.attributes["href"])
                 return self.load(url)
             # 处理：输入框
             elif elt.tag == "input":
+                if self.js.dispatch_event("click", elt): return
                 self.focus = elt
                 elt.attributes["value"] = ""
                 self.focus = elt
                 elt.is_focused = True
                 return self.render()
             elif elt.tag == "button":
+                if self.js.dispatch_event("click", elt): return
                 while elt:
                     if elt.tag == "form" and "action" in elt.attributes:
                         return self.submit_form(elt)
@@ -616,6 +625,7 @@ class Tab:
         self.render()
       
     def submit_form(self, elt):
+        if self.js.dispatch_event("submit", elt): return
         inputs = [node for node in tree_to_list(elt, [])
                   if isinstance(node, Element)
                   and node.tag == "input"
@@ -657,6 +667,23 @@ class Tab:
         # 第1次遍历：生成 node tree
         self.nodes = HTMLParser(body).parse()
         
+        # js
+        self.js = JSContext(self)
+        # 找到所有 JS 的 url(string)
+        scripts = [node.attributes["src"] for node
+                   in tree_to_list(self.nodes, [])
+                   if isinstance(node, Element)
+                   and node.tag == "script"
+                   and "src" in node.attributes]
+        for script in scripts:
+            script_url = url.resolve(script)
+            try:
+                body = script_url.request()
+            except:
+                continue
+            self.js.run(script, body)
+
+        
         # 获取 css 文件
         self.rules = DEFAULT_STYLE_SHEET.copy()
         links = [node.attributes["href"]
@@ -687,6 +714,92 @@ class Tab:
         # 第4次遍历：生成绘制列表 (Painting)
         self.display_list = []
         paint_tree(self.document, self.display_list)
+   
+RUNTIME_JS = open("runtime.js").read()
+EVENT_DISPATCH_JS = "new Node(dukpy.handle).dispatchEvent(new Event(dukpy.type))"
+
+
+class JSContext:
+    def __init__(self, tab):
+        self.tab = tab
+        self.interp = dukpy.JSInterpreter()
+        
+        # handle 与 node 的映射关系
+        # handle：字典中条目的数量
+        self.node_to_handle = {}
+        self.handle_to_node = {}
+        
+        # （js函数名称, py函数名称）
+        self.interp.export_function("log", print)
+        self.interp.export_function("querySelectorAll", self.querySelectorAll)
+        self.interp.export_function("getAttribute", self.getAttribute)
+        self.interp.export_function("innerHTML_set", self.innerHTML_set)
+        
+        self.interp.evaljs(RUNTIME_JS)
+    
+    def innerHTML_set(self, handle, s):
+        """
+        在 Python 端设置由句柄标识的 DOM 元素的 innerHTML。
+
+        当 JavaScript 代码修改元素的 `innerHTML` 属性时，此方法被调用。
+        它会解析传入的 HTML 字符串，用新生成的节点替换目标元素的
+        现有子节点，并触发页面的重新渲染。
+
+        参数:
+            handle (int): 唯一标识目标 DOM 元素的整数句柄。
+                          这个句柄是从 JavaScript 环境传递过来的。
+            s (str):      要设置为元素新内容的 HTML 字符串。
+
+        副作用:
+            - 修改由 `handle` 标识的 DOM 元素的子节点。
+            - 调用 `self.tab.render()` 来更新浏览器标签页的显示。
+        """
+        doc = HTMLParser("<html><body>" + s + "</body></html>").parse()
+        new_nodes = doc.children[0].children
+        elt = self.handle_to_node[handle]
+        elt.children = new_nodes
+        for child in elt.children:
+            child.parent = elt
+        self.tab.render()
+
+
+    def dispatch_event(self, type, elt):
+        handle = self.node_to_handle.get(elt, -1)
+        do_default = self.interp.evaljs(
+            EVENT_DISPATCH_JS, type=type, handle=handle)
+        return not do_default
+    
+    
+    # handle, 属性名 -> 属性值
+    def getAttribute(self, handle, attr):
+        elt = self.handle_to_node[handle]
+        attr = elt.attributes.get(attr, None)
+        return attr if attr else ""
+        
+    # element -> handle
+    def get_handle(self, elt):
+        if elt not in self.node_to_handle:
+            handle = len(self.node_to_handle)
+            self.node_to_handle[elt] = handle
+            self.handle_to_node[handle] = elt
+        else:
+            handle = self.node_to_handle[elt]
+        return handle
+
+    # text -> handles
+    def querySelectorAll(self, selector_text):
+        # TagSelector / DescendantSelector
+        selector = CSSParser(selector_text).selector()
+        nodes = [node for node
+             in tree_to_list(self.tab.nodes, [])
+             if selector.matches(node)]
+        return [self.get_handle(node) for node in nodes]
+        
+    def run(self, script, code):
+        try:
+            return self.interp.evaljs(code)
+        except dukpy.JSRuntimeError as e:
+            print("Script", script, "crashed", e)
         
 class Text:
     '''
