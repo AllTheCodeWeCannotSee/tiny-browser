@@ -147,12 +147,13 @@ def show_comments(session):
     
     # 登陆
     if "user" in session:
-        # nonce
+        out += "<h1>Hello, " + session["user"] + "</h1>"
+        
         nonce = str(random.random())[2:]
         session["nonce"] = nonce
         
-        out += "<h1>Hello, " + session["user"] + "</h1>"
         out += "<form action=add method=post>"
+        out +=   "<p><input name=guest></p>"
         out +=   "<input name=nonce type=hidden value=" + nonce + ">"
         out +=   "<p><button>Sign the book!</button></p>"
         out += "</form>"
@@ -167,7 +168,7 @@ def show_comments(session):
     out += "<link rel=stylesheet href=/comment.css>"
     out += "<strong></strong>"
     out += "<script src=/comment.js></script>"
-    out += "<script src=https://example.com/evil.js></script>"
+
     return out
 
 def not_found(url, method):

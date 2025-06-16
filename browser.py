@@ -1,11 +1,14 @@
 import socket
 import ssl
 import os
-import tkinter
-import tkinter.font
+
 import sys
 import urllib.parse
 import dukpy
+import ctypes
+import sdl2
+import skia
+import math
 
 WIDTH, HEIGHT = 800, 600
 SCROLL_STEP = 100
@@ -326,68 +329,30 @@ DEFAULT_STYLE_SHEET = CSSParser(open("browser.css").read()).parse()
 
 
 
-class Rect:
-    def __init__(self, left, top, right, bottom):
-        self.left = left
-        self.top = top
-        self.right = right
-        self.bottom = bottom
-    def contains_point(self, x, y):
-        return x >= self.left and x < self.right \
-            and y >= self.top and y < self.bottom 
-
-class DrawLine:
-    def __init__(self, x1, y1, x2, y2, color, thickness):
-        self.rect = Rect(x1, y1, x2, y2)
-        self.color = color
-        self.thickness = thickness
-
-    def execute(self, scroll, canvas):
-        canvas.create_line(
-            self.rect.left, self.rect.top - scroll,
-            self.rect.right, self.rect.bottom - scroll,
-            fill=self.color, width=self.thickness)
-
-class DrawOutline:
-    def __init__(self, rect, color, thickness):
-        self.rect = rect
-        self.color = color
-        self.thickness = thickness
-    def execute(self, scroll, canvas):
-        canvas.create_rectangle(
-            self.rect.left, self.rect.top - scroll,
-            self.rect.right, self.rect.bottom - scroll,
-            outline=self.color,
-            width=self.thickness
-        )
-        
-
 class Chrome:
     '''
         浏览器上的工具栏，除了显示的网页外的内容
     '''
     def __init__(self, browser):
         self.browser = browser
+        self.focus = None
+        self.address_bar = ""
+        
         self.font = get_font(20, "normal", "roman")
-        self.font_height = self.font.metrics("linespace")
+        self.font_height = linespace(self.font)
         
         self.padding = 5
         self.tabbar_top = 0
         self.tabbar_bottom = self.font_height + 2*self.padding
         
-        self.bottom = self.tabbar_bottom
-        
-        self.focus = None
-        self.address_bar = ""
         
         # Button: + 
-        plus_width = self.font.measure("+") + 2*self.padding
-        self.newtab_rect = Rect(
-            self.padding,
-            self.padding,
-            self.padding + plus_width,
-            self.padding + self.font_height
-        )
+        plus_width = self.font.measureText("+") + 2*self.padding
+
+        self.newtab_rect = skia.Rect.MakeLTRB(
+           self.padding, self.padding,
+           self.padding + plus_width,
+           self.padding + self.font_height)
         
         # 地址栏
         self.urlbar_top = self.tabbar_bottom
@@ -395,20 +360,22 @@ class Chrome:
         self.bottom = self.urlbar_bottom
         
         # 后退按钮 <
-        back_width = self.font.measure("<") + 2*self.padding
-        self.back_rect = Rect(
+        back_width = self.font.measureText("<") + 2*self.padding
+        self.back_rect = skia.Rect.MakeLTRB(
             self.padding,
             self.urlbar_top + self.padding,
             self.padding + back_width,
             self.urlbar_bottom - self.padding)
         
         # 地址栏
-        self.address_rect = Rect(
-            self.back_rect.top + self.padding,
+        self.address_rect = skia.Rect.MakeLTRB(
+            self.back_rect.top() + self.padding,
             self.urlbar_top + self.padding,
             WIDTH - self.padding,
             self.urlbar_bottom - self.padding)
-    
+
+        self.bottom = self.urlbar_bottom
+
     def blur(self):
         self.focus = None
     
@@ -422,34 +389,38 @@ class Chrome:
         if self.focus == "address bar":
             self.browser.active_tab.load(URL(self.address_bar))
             self.focus = None
+            self.browser.focus = None
+
     
     def click(self, x, y):
         self.focus = None
-        
-        if self.newtab_rect.contains_point(x, y):
+        if self.newtab_rect.contains(x, y):
             self.browser.new_tab(URL("https://browser.engineering/"))
-        elif self.back_rect.contains_point(x, y):
+        elif self.back_rect.contains(x, y):
             self.browser.active_tab.go_back()
-        elif self.address_rect.contains_point(x, y):
+            self.browser.raster_chrome()
+            self.browser.raster_tab()
+            self.browser.draw()
+        elif self.address_rect.contains(x, y):
             self.focus = "address bar"
             self.address_bar = ""
         else:
             for i, tab in enumerate(self.browser.tabs):
-                if self.tab_rect(i).contains_point(x, y):
+                if self.tab_rect(i).contains(x, y):
                     self.browser.active_tab = tab
                     break
+            self.browser.raster_tab()
 
     def tab_rect(self, i):
-        tabs_start = self.newtab_rect.right + self.padding
-        tab_width =self.font.measure("Tab X") + 2*self.padding
-        return Rect(
+        tabs_start = self.newtab_rect.right() + self.padding
+        tab_width =self.font.measureText("Tab X") + 2*self.padding
+        return skia.Rect.MakeLTRB(
             tabs_start + tab_width * i, self.tabbar_top,
             tabs_start + tab_width * (i + 1), self.tabbar_bottom)
+        
     def paint(self):
         cmds = []
         
-        # 绘制白色矩形
-        cmds.append(DrawRect(Rect(0, 0, WIDTH, self.bottom), "white"))
         
         # 界面底部的分割线
         cmds.append(DrawLine(0, self.bottom, WIDTH, self.bottom, "black", 1))
@@ -457,8 +428,8 @@ class Chrome:
         # 绘制 +
         cmds.append(DrawOutline(self.newtab_rect, "black", 1))
         cmds.append(
-            DrawText(self.newtab_rect.left + self.padding,
-                     self.newtab_rect.top,
+            DrawText(self.newtab_rect.left() + self.padding,
+                     self.newtab_rect.top(),
                      "+",
                      self.font,"black"))
         
@@ -466,31 +437,30 @@ class Chrome:
         for i, tab in enumerate(self.browser.tabs):
             bounds = self.tab_rect(i)
             cmds.append(DrawLine(
-                bounds.left, 0, bounds.left, bounds.bottom,
+                bounds.left(), 0, bounds.left(), bounds.bottom(),
                 "black", 1))
             cmds.append(DrawLine(
-                bounds.right, 0, bounds.right, bounds.bottom,
+                bounds.right(), 0, bounds.right(), bounds.bottom(),
                 "black", 1))
             cmds.append(DrawText(
-                bounds.left + self.padding, bounds.top + self.padding,
+                bounds.left() + self.padding, bounds.top() + self.padding,
                 "Tab {}".format(i), self.font, "black"))
-            
-        # 突出显示活动页
-        if tab == self.browser.active_tab:
-            cmds.append(DrawLine(
-                0, bounds.bottom, bounds.left, bounds.bottom,
-                "black", 1))
-            cmds.append(DrawLine(
-                bounds.right, bounds.bottom, WIDTH, bounds.bottom,
-                "black", 1))
+
+            if tab == self.browser.active_tab:
+                cmds.append(DrawLine(
+                    0, bounds.bottom(), bounds.left(), bounds.bottom(),
+                    "black", 1))
+                cmds.append(DrawLine(
+                    bounds.right(), bounds.bottom(), WIDTH, bounds.bottom(),
+                    "black", 1))
         
 
          
         # 绘制后退按钮
         cmds.append(DrawOutline(self.back_rect, "black", 1))
         cmds.append(DrawText(
-            self.back_rect.left + self.padding,
-            self.back_rect.top,
+            self.back_rect.left() + self.padding,
+            self.back_rect.top(),
             "<", self.font, "black"))      
     
         # 绘制地址栏
@@ -499,81 +469,229 @@ class Chrome:
         # 地址栏成为焦点时  
         if self.focus == "address bar":
             cmds.append(DrawText(
-                self.address_rect.left + self.padding,
-                self.address_rect.top,
+                self.address_rect.left() + self.padding,
+                self.address_rect.top(),
                 self.address_bar, self.font, "black"))
             
             # 光标
-            w = self.font.measure(self.address_bar)
+            w = self.font.measureText(self.address_bar)
             cmds.append(DrawLine(
-                self.address_rect.left + self.padding + w,
-                self.address_rect.top,
-                self.address_rect.left + self.padding + w,
-                self.address_rect.bottom,
+                self.address_rect.left() + self.padding + w,
+                self.address_rect.top(),
+                self.address_rect.left() + self.padding + w,
+                self.address_rect.bottom(),
                 "red", 1))
         else:
             url = str(self.browser.active_tab.url)
             cmds.append(DrawText(
-                self.address_rect.left + self.padding,
-                self.address_rect.top,
+                self.address_rect.left() + self.padding,
+                self.address_rect.top(),
                 url, self.font, "black"))
             
         return cmds
 
+
+# sdl 的 mainloop
+def mainloop(browser):
+    event = sdl2.SDL_Event()
+    while True:
+        while sdl2.SDL_PollEvent(ctypes.byref(event)) != 0:
+            if event.type == sdl2.SDL_QUIT:
+                browser.handle_quit()
+                sdl2.SDL_Quit()
+                sys.exit()
+            # 绑定事件
+            elif event.type == sdl2.SDL_MOUSEBUTTONUP:
+                browser.handle_click(event.button)
+            elif event.type == sdl2.SDL_KEYDOWN:
+                if event.key.keysym.sym == sdl2.SDLK_RETURN:
+                    browser.handle_enter()
+                elif event.key.keysym.sym == sdl2.SDLK_DOWN:
+                    browser.handle_down()
+            elif event.type == sdl2.SDL_TEXTINPUT:
+                browser.handle_key(event.text.text.decode('utf8'))
+ 
+ 
+NAMED_COLORS = {
+    "black": "#000000",
+    "gray":  "#808080",
+    "white": "#ffffff",
+    "red":   "#ff0000",
+    "green": "#00ff00",
+    "blue":  "#0000ff",
+    "lightblue": "#add8e6",
+    "lightgreen": "#90ee90",
+    "orange": "#ffa500",
+    "orangered": "#ff4500",
+}
+
+
+def parse_color(color):
+    if color.startswith("#") and len(color) == 7:
+        r = int(color[1:3], 16)
+        g = int(color[3:5], 16)
+        b = int(color[5:7], 16)
+        return skia.Color(r, g, b)
+    elif color.startswith("#") and len(color) == 9:
+        r = int(color[1:3], 16)
+        g = int(color[3:5], 16)
+        b = int(color[5:7], 16)
+        a = int(color[7:9], 16)
+        return skia.Color(r, g, b, a)
+    elif color in NAMED_COLORS:
+        return parse_color(NAMED_COLORS[color])
+    else:
+        return skia.ColorBLACK
+
+    
+              
 class Browser:
     '''
         管理键盘事件（Tab管理鼠标）
     '''
     def __init__(self):
+        self.chrome = Chrome(self)
+        # sdl
+        self.sdl_window = sdl2.SDL_CreateWindow(b"Browser",
+            sdl2.SDL_WINDOWPOS_CENTERED, sdl2.SDL_WINDOWPOS_CENTERED,
+            WIDTH, HEIGHT, sdl2.SDL_WINDOW_SHOWN)
+        
+        # Skia surface
+        self.root_surface = skia.Surface.MakeRaster( # 创建一个基于 CPU 内存的栅格化表面的函数
+            skia.ImageInfo.Make( # 描述了栅格表面的属性，例如尺寸和像素格式
+                WIDTH, HEIGHT,
+                ct=skia.kRGBA_8888_ColorType, # 颜色类型：红蓝绿透明度，每个占8位
+                at=skia.kUnpremul_AlphaType)) # 代表 Alpha 类型
+        # chrome_surface
+        self.chrome_surface = skia.Surface(
+            WIDTH, math.ceil(self.chrome.bottom))
+        
+        # tab_surface
+        self.tab_surface = None
+        
         
         self.tabs = []
         self.active_tab = None
         self.focus = None
         
-        self.window = tkinter.Tk()
-        self.canvas = tkinter.Canvas(
-            self.window, 
-            width=WIDTH,
-            height=HEIGHT,
-            bg="white"
-        )
-        self.canvas.pack()
+        # 根据系统的字节序来设置 RGBA 的掩码
+        # 将像素缓冲区（从 Skia 表面获取的）传递给 SDL 以创建 surface
+        if sdl2.SDL_BYTEORDER == sdl2.SDL_BIG_ENDIAN:
+            self.RED_MASK = 0xff000000
+            self.GREEN_MASK = 0x00ff0000
+            self.BLUE_MASK = 0x0000ff00
+            self.ALPHA_MASK = 0x000000ff
+        else:
+            self.RED_MASK = 0x000000ff
+            self.GREEN_MASK = 0x0000ff00
+            self.BLUE_MASK = 0x00ff0000
+            self.ALPHA_MASK = 0xff000000
         
-        self.window.bind("<Down>", self.handle_down)
-        self.window.bind("<Up>", self.handle_up)
-        self.window.bind("<Button-1>", self.handle_click)
-        self.window.bind("<Key>", self.handle_key)
-        self.window.bind("<Return>", self.handle_enter)
-        
-        self.chrome = Chrome(self)
-        
-    def draw(self):
-        self.canvas.delete("all")
-        self.active_tab.draw(self.canvas, self.chrome.bottom)
-        for cmd in self.chrome.paint():
-            cmd.execute(0, self.canvas)
     
-    def handle_enter(self, e):
-        self.chrome.enter()
-        self.draw()
+    def handle_quit(self):
+        sdl2.SDL_DestroyWindow(self.sdl_window)
         
-    def handle_key(self, e):
-        if len(e.char) == 0: return
-        if not (0x20 <= ord(e.char) < 0x7f): return
+       
+    def raster_tab(self):
+        tab_height = math.ceil(
+            self.active_tab.document.height + 2*VSTEP)
+
+        if not self.tab_surface or \
+                tab_height != self.tab_surface.height():
+            self.tab_surface = skia.Surface(WIDTH, tab_height)
         
-        if self.chrome.keypress(e.char):
+        canvas = self.tab_surface.getCanvas()
+        canvas.clear(skia.ColorWHITE)
+        self.active_tab.raster(canvas)
+
+    def raster_chrome(self):
+        canvas = self.chrome_surface.getCanvas()
+        canvas.clear(skia.ColorWHITE)
+
+        for cmd in self.chrome.paint():
+            cmd.execute(canvas)
+ 
+    
+    def draw(self):
+        '''
+        Skia 高质量的2D图形渲染
+        SDL2 跨平台的窗口管理和底层硬件交互
+        -------------------------------------
+            用 Skia 绘制好网页内容 
+            -> 将绘制结果转换为原始像素数据 
+            -> 用这些数据创建一个 SDL 表面 
+            -> 将这个 SDL 表面复制到窗口的显示表面 
+            -> 更新窗口，让用户看到最新的内容。
+        '''
+        
+        # 该画布绑定到 root_surface
+        canvas = self.root_surface.getCanvas()
+        canvas.clear(skia.ColorWHITE)
+        
+        # 将 tab_surface 复制到 canvas 上
+        tab_rect = skia.Rect.MakeLTRB(
+            0, self.chrome.bottom, WIDTH, HEIGHT)
+        tab_offset = self.chrome.bottom - self.active_tab.scroll
+        canvas.save()
+        canvas.clipRect(tab_rect)
+        canvas.translate(0, tab_offset)
+        self.tab_surface.draw(canvas, 0, 0)
+        canvas.restore()
+
+        # 将 chrome_surface 复制到 canvas 上
+        chrome_rect = skia.Rect.MakeLTRB(
+            0, 0, WIDTH, self.chrome.bottom)
+        canvas.save()
+        canvas.clipRect(chrome_rect)
+        self.chrome_surface.draw(canvas, 0, 0)
+        canvas.restore()
+        
+
+        # This makes an image interface to the Skia surface, but
+        # doesn't actually copy anything yet.
+        skia_image = self.root_surface.makeImageSnapshot()
+        skia_bytes = skia_image.tobytes()
+        
+        # 从一个已有的像素数据缓冲区 (skia_bytes) 创建一个 SDL 表面 (surface)。
+        # 将一个图形库（Skia）绘制的内容显示在由另一个库（SDL）管理的窗口中。
+        depth = 32 # Bits per pixel
+        pitch = 4 * WIDTH # Bytes per row
+        sdl_surface = sdl2.SDL_CreateRGBSurfaceFrom(
+            skia_bytes, WIDTH, HEIGHT, depth, pitch,
+            self.RED_MASK, self.GREEN_MASK,
+            self.BLUE_MASK, self.ALPHA_MASK)
+
+        rect = sdl2.SDL_Rect(0, 0, WIDTH, HEIGHT)
+        window_surface = sdl2.SDL_GetWindowSurface(self.sdl_window)
+        # SDL_BlitSurface is what actually does the copy.
+        sdl2.SDL_BlitSurface(sdl_surface, rect, window_surface, rect)
+        sdl2.SDL_UpdateWindowSurface(self.sdl_window)
+        
+        
+    def handle_enter(self):
+        if self.chrome.focus:
+            self.chrome.enter()
+            self.raster_tab()
+            self.raster_chrome()
+            self.draw()
+        
+    def handle_key(self, char):
+        if not (0x20 <= ord(char) < 0x7f): return
+        if self.chrome.focus:
+            self.chrome.keypress(char)
+            self.raster_chrome()
             self.draw()
         elif self.focus == "content":
-            self.active_tab.keypress(e.char)
+            self.active_tab.keypress(char)
+            self.raster_tab()
             self.draw()
         
         
-        
-    def handle_down(self, e):
+    def handle_down(self):
         self.active_tab.scrolldown()
         self.draw()
         
-    def handle_up(self, e):
+    def handle_up(self):
         self.active_tab.scrollup()
         self.draw()
         
@@ -581,19 +699,32 @@ class Browser:
         if e.y < self.chrome.bottom:
             self.focus = None
             self.chrome.click(e.x, e.y)
+            self.raster_chrome()
         else:
-            self.focus = "content"
-            self.chrome.blur()
-            
+            if self.focus != "content":
+                self.focus = "content"
+                self.chrome.blur()
+                self.raster_chrome()
+            url = self.active_tab.url
             tab_y = e.y - self.chrome.bottom
             self.active_tab.click(e.x, tab_y)
+            if self.active_tab.url != url:
+                self.raster_chrome()
+            self.raster_tab()
         self.draw()
+        
     def new_tab(self, url):
         new_tab = Tab(HEIGHT - self.chrome.bottom)
         new_tab.load(url)
-        self.active_tab = new_tab
         self.tabs.append(new_tab)
+        self.active_tab = new_tab
+        
+        self.raster_chrome()
+        self.raster_tab()
+        
         self.draw()
+        
+    
         
 class Tab:
     def __init__(self, tab_height):
@@ -703,11 +834,10 @@ class Tab:
     def scrollup(self):
         self.scroll -= SCROLL_STEP
 
-    def draw(self, canvas, offset):
+    def raster(self, canvas):
         for cmd in self.display_list:
-            if cmd.rect.top > self.scroll + self.tab_height: continue
-            if cmd.rect.bottom < self.scroll: continue
-            cmd.execute(self.scroll - offset, canvas)
+            cmd.execute(canvas)
+            
     def load(self, url, payload=None):
         '''
             url: 要访问的新URL
@@ -1048,6 +1178,9 @@ class DocumentLayout:
     def should_paint(self):
         return True
 
+    def paint_effects(self, cmds):
+        return cmds
+    
 class BlockLayout:
     '''
         块级元素的布局对象
@@ -1081,12 +1214,20 @@ class BlockLayout:
         self.height = None
         self.display_list = []
 
+    def paint_effects(self, cmds):
+        cmds = paint_visual_effects(
+            self.node, cmds, self.self_rect())
+        return cmds
+    
     def should_paint(self):
         return isinstance(self.node, Text) or \
             (self.node.tag != "input" and self.node.tag !=  "button")
     
+
     def self_rect(self):
-        return Rect(self.x, self.y, self.x + self.width, self.y + self.height)
+        return skia.Rect.MakeLTRB(
+            self.x, self.y,
+            self.x + self.width, self.y + self.height)
         
     def layout_mode(self):
         if isinstance(self.node, Text):
@@ -1138,29 +1279,17 @@ class BlockLayout:
             rect = DrawRect(self.self_rect(), bgcolor)
             cmds.append(rect)
 
-        if self.layout_mode() == "inline":
-            for x, y, word, font, color in self.display_list:
-                cmds.append(DrawText(x, y, word, font, color))
         
         if bgcolor != "transparent":
-            rect = DrawRect(self.self_rect(), bgcolor)
-            cmds.append(rect)
+            radius = float(
+                self.node.style.get(
+                    "border-radius", "0px")[:-2])
+            cmds.append(DrawRRect(
+                self.self_rect(), radius, bgcolor))
             
         return cmds
         
-    def flush(self):
-        if not self.line: return
-        metrics = [font.metrics() for x, word, font, color in self.line]
-        max_ascent = max([metric["ascent"] for metric in metrics])
-        baseline = self.cursor_y + 1.25 * max_ascent
-        for rel_x, word, font, color in self.line:
-            x = self.x + rel_x
-            y = self.y + baseline - font.metrics("ascent")
-            self.display_list.append((x, y, word, font, color))
-        self.cursor_x = 0
-        self.line = []
-        max_descent = max([metric["descent"] for metric in metrics])
-        self.cursor_y = baseline + 1.25 * max_descent
+
             
     def recurse(self, node):
         '''
@@ -1194,11 +1323,11 @@ class BlockLayout:
 
         weight = node.style["font-weight"]
         style = node.style["font-style"]
-        if style == "normal": style = "roman"
-        size = int(float(node.style["font-size"][:-2]) * .75)
+
+        size = float(node.style["font-size"][:-2]) * .75
         font = get_font(size, weight, style)
 
-        self.cursor_x += w + font.measure(" ")
+        self.cursor_x += w + font.measureText(" ")
     
     def word(self, node, word): 
         '''
@@ -1209,15 +1338,11 @@ class BlockLayout:
             node: TextNode
             word: str
         '''
-        color = node.style["color"]
         weight = node.style["font-weight"]
         style = node.style["font-style"]
-        if style == "normal": 
-            style = "roman"
-        size = int(float(node.style["font-size"][:-2]) * .75)
-        
+        size = float(node.style["font-size"][:-2]) * .75
         font = get_font(size, weight, style)
-        w = font.measure(word)
+        w = font.measureText(word)
         
         if self.cursor_x + w > self.width:
             # 如果到达行尾，处理 line 缓冲区
@@ -1227,15 +1352,29 @@ class BlockLayout:
         previous_word = line.children[-1] if line.children else None
         text = TextLayout(node, word, line, previous_word)
         line.children.append(text)
+        self.cursor_x += w + font.measureText(" ")
         
-        self.cursor_x += w + font.measure(" ")
     def new_line(self):
         self.cursor_x = 0
         last_line = self.children[-1] if self.children else None
         new_line = LineLayout(self.node, self, last_line)
         self.children.append(new_line)
-       
+  
+def paint_visual_effects(node, cmds, rect):
+    opacity = float(node.style.get("opacity", "1.0"))
+    blend_mode = node.style.get("mix-blend-mode")
 
+    if node.style.get("overflow", "visible") == "clip":
+        border_radius = float(node.style.get(
+            "border-radius", "0px")[:-2])
+        if not blend_mode:
+            blend_mode = "source-over"
+        cmds.append(Blend(1.0, "destination-in", [
+            DrawRRect(rect, border_radius, "white")
+        ]))
+
+    return [Blend(opacity, blend_mode, cmds)]
+     
 class LineLayout:
     def __init__(self, node, parent, previous):
         self.node = node
@@ -1265,17 +1404,20 @@ class LineLayout:
             self.height = 0
             return
 
-        max_ascent = max([word.font.metrics("ascent") 
+        max_ascent = max([-word.font.getMetrics().fAscent 
                           for word in self.children])
         baseline = self.y + 1.25 * max_ascent
         for word in self.children:
-            word.y = baseline - word.font.metrics("ascent")
-        max_descent = max([word.font.metrics("descent")
+            word.y = baseline + word.font.getMetrics().fAscent
+        max_descent = max([word.font.getMetrics().fDescent
                            for word in self.children])
         self.height = 1.25 * (max_ascent + max_descent)
     def paint(self):
         return []
         
+    def paint_effects(self, cmds):
+        return cmds
+    
 class TextLayout:
     def __init__(self, node, word, parent, previous):
         self.node = node
@@ -1300,21 +1442,28 @@ class TextLayout:
         size = int(float(self.node.style["font-size"][:-2]) * .75)
         self.font = get_font(size, weight, style)
         
-        self.width = self.font.measure(self.word)
+        self.width = self.font.measureText(self.word)
 
         if self.previous:
-            space = self.previous.font.measure(" ")
+            space = self.previous.font.measureText(" ")
             self.x = self.previous.x + space + self.previous.width
         else:
             self.x = self.parent.x
 
-        self.height = self.font.metrics("linespace")
+        self.height = linespace(self.font)
+        
     def paint(self):
+        cmds = []
         color = self.node.style["color"]
-        return [DrawText(self.x, self.y, self.word, self.font, color)]
-
+        cmds.append(
+            DrawText(self.x, self.y, self.word, self.font, color))
+        return cmds
+    
+    def paint_effects(self, cmds):
+        return cmds
         
 INPUT_WIDTH_PX = 200
+
 class InputLayout:
     def __init__(self, node, parent, previous):
         self.node = node
@@ -1334,31 +1483,37 @@ class InputLayout:
     def layout(self):
         weight = self.node.style["font-weight"]
         style = self.node.style["font-style"]
-        if style == "normal": style = "roman"
-        size = int(float(self.node.style["font-size"][:-2]) * .75)
+
+        size = float(self.node.style["font-size"][:-2]) * .75
         self.font = get_font(size, weight, style)
         
         self.width = INPUT_WIDTH_PX
+        self.height = linespace(self.font)
 
         if self.previous:
-            space = self.previous.font.measure(" ")
+            space = self.previous.font.measureText(" ")
             self.x = self.previous.x + space + self.previous.width
         else:
             self.x = self.parent.x
 
-        self.height = self.font.metrics("linespace")
     
     def self_rect(self):
-        return Rect(self.x, self.y, self.x + self.width, self.y + self.height) 
+        return skia.Rect.MakeLTRB(
+            self.x, self.y, self.x + self.width,
+            self.y + self.height)
     
     def paint(self):
         cmds = []
         bgcolor = self.node.style.get("background-color", "transparent")
         
+        if self.node.attributes.get("type") == "hidden":
+            return cmds
+        
         # 绘制背景
         if bgcolor != "transparent":
-            rect = DrawRect(self.self_rect(), bgcolor)
-            cmds.append(rect)
+            radius = float(self.node.style.get("border-radius", "0px")[:-2])
+            cmds.append(DrawRRect(self.self_rect(), radius, bgcolor))
+
         
         # 获取输入框中的文本/按钮的文本
         if self.node.tag == "input":
@@ -1377,50 +1532,164 @@ class InputLayout:
 
         # 绘制焦点
         if self.node.is_focused:
-            cx = self.x + self.font.measure(text)
+            cx = self.x + self.font.measureText(text)
             cmds.append(DrawLine(
                 cx, self.y, cx, self.y + self.height, "black", 1))
         
         return cmds
-        
-        
-        
-        
-
-
+    
+    def paint_effects(self, cmds):
+        return paint_visual_effects(self.node, cmds, self.self_rect())
+    
 class DrawText:
     def __init__(self, x1, y1, text, font, color):
-        self.rect = Rect(x1, y1,
-            x1 + font.measure(text), y1 + font.metrics("linespace"))
+        
+        self.rect = skia.Rect.MakeLTRB(
+            x1, y1,
+            x1 + font.measureText(text),
+            y1 - font.getMetrics().fAscent \
+                + font.getMetrics().fDescent)
+        
+        
         self.text = text
         self.font = font
         self.color = color
 
-    def execute(self, scroll, canvas):
-        canvas.create_text(
-            self.rect.left, self.rect.top - scroll,
-            text=self.text,
-            font=self.font,
-            anchor='nw',
-            fill=self.color)
+    def execute(self, canvas):
+        paint = skia.Paint(
+            AntiAlias=True,
+            Color=parse_color(self.color),
+        )
+        baseline = self.rect.top() \
+            - self.font.getMetrics().fAscent
+        canvas.drawString(self.text, float(self.rect.left()),
+            baseline, self.font, paint)
     
 class DrawRect:
     def __init__(self, rect, color):
         self.rect = rect
         self.color = color
-    def execute(self, scroll, canvas):
-        canvas.create_rectangle(
-            self.rect.left, self.rect.top - scroll,
-            self.rect.right, self.rect.bottom - scroll,
-            width=0,
-            fill=self.color)
+    def execute(self, canvas):
+        paint = skia.Paint(
+            Color=parse_color(self.color),
+        )
+        canvas.drawRect(self.rect, paint)
 
+
+class Rect:
+    def __init__(self, left, top, right, bottom):
+        self.left = left
+        self.top = top
+        self.right = right
+        self.bottom = bottom
+    def contains_point(self, x, y):
+        return x >= self.left and x < self.right \
+            and y >= self.top and y < self.bottom 
+
+class DrawLine:
+    def __init__(self, x1, y1, x2, y2, color, thickness):
+        self.rect = skia.Rect.MakeLTRB(x1, y1, x2, y2)
+        self.color = color
+        self.thickness = thickness
+
+    def execute(self, canvas):
+        path = skia.Path().moveTo(
+            self.rect.left(), self.rect.top()) \
+                .lineTo(self.rect.right(),
+                    self.rect.bottom())
+        paint = skia.Paint(
+            Color=parse_color(self.color),
+            StrokeWidth=self.thickness,
+            Style=skia.Paint.kStroke_Style,
+        )
+        canvas.drawPath(path, paint)
+
+class DrawOutline:
+    def __init__(self, rect, color, thickness):
+        self.rect = rect
+        self.color = color
+        self.thickness = thickness
+    def execute(self, canvas):
+        paint = skia.Paint(
+            Color=parse_color(self.color),
+            StrokeWidth=self.thickness,
+            Style=skia.Paint.kStroke_Style,
+        )
+        canvas.drawRect(self.rect, paint)
+        
+class DrawRRect:
+    def __init__(self, rect, radius, color):
+        self.rect = rect
+        self.rrect = skia.RRect.MakeRectXY(rect, radius, radius)
+        self.color = color
+
+    def execute(self, canvas):
+        paint = skia.Paint(
+            Color=parse_color(self.color),
+        )
+        canvas.drawRRect(self.rrect, paint)
+
+
+
+
+class Blend:
+    def __init__(self, opacity, blend_mode, children):
+        self.opacity = opacity
+        self.blend_mode = blend_mode
+        self.should_save = self.blend_mode or self.opacity < 1
+
+        self.children = children
+        self.rect = skia.Rect.MakeEmpty()
+        for cmd in self.children:
+            self.rect.join(cmd.rect)
+
+    def execute(self, canvas):
+        paint = skia.Paint(
+            Alphaf=self.opacity,
+            BlendMode=parse_blend_mode(self.blend_mode),
+        )
+        if self.should_save:
+            canvas.saveLayer(None, paint)
+        for cmd in self.children:
+            cmd.execute(canvas)
+        if self.should_save:
+            canvas.restore()
+
+
+
+
+def parse_blend_mode(blend_mode_str):
+    if blend_mode_str == "multiply":
+        return skia.BlendMode.kMultiply
+    elif blend_mode_str == "difference":
+        return skia.BlendMode.kDifference
+    elif blend_mode_str == "destination-in":
+        return skia.BlendMode.kDstIn
+    elif blend_mode_str == "source-over":
+        return skia.BlendMode.kSrcOver
+    else:
+        return skia.BlendMode.kSrcOver
+
+
+def linespace(font):
+    '''
+        计算出该字体用于渲染一行文本时所占用的总垂直高度
+    '''
+    metrics = font.getMetrics()
+    return metrics.fDescent - metrics.fAscent
 
 def paint_tree(layout_object, display_list):
+    cmds = []
     if layout_object.should_paint():
-        display_list.extend(layout_object.paint())
-        for child in layout_object.children:
-            paint_tree(child, display_list)
+        cmds = layout_object.paint()
+    for child in layout_object.children:
+        paint_tree(child, cmds)
+
+    if layout_object.should_paint():
+        cmds = layout_object.paint_effects(cmds)
+    display_list.extend(cmds)
+
+
         
 def parseHttp(url):
     if "/" not in url:
@@ -1448,13 +1717,22 @@ def parseFile(url):
     return None, None, url
 
 def get_font(size, weight, style):
-    key = (size, weight, style)
+    key = (weight, style)
     if key not in FONTS:
-        font = tkinter.font.Font(size=size, weight=weight,
-            slant=style)
-        label = tkinter.Label(font=font)
-        FONTS[key] = (font, label)
-    return FONTS[key][0]
+        if weight == "bold":
+            skia_weight = skia.FontStyle.kBold_Weight
+        else:
+            skia_weight = skia.FontStyle.kNormal_Weight
+        if style == "italic":
+            skia_style = skia.FontStyle.kItalic_Slant
+        else:
+            skia_style = skia.FontStyle.kUpright_Slant
+        skia_width = skia.FontStyle.kNormal_Width
+        style_info = \
+            skia.FontStyle(skia_weight, skia_width, skia_style)
+        font = skia.Typeface('Arial', style_info)
+        FONTS[key] = font
+    return skia.Font(FONTS[key], size)
 
 def print_tree(node, indent=0):
     print(" " * indent, node)
@@ -1463,11 +1741,11 @@ def print_tree(node, indent=0):
 
 
 if __name__ == "__main__":
-    Browser().new_tab(URL(sys.argv[1]))
-    tkinter.mainloop()
-    
-    # Browser().load(URL(sys.argv[1]))
-    # tkinter.mainloop()
+    sdl2.SDL_Init(sdl2.SDL_INIT_EVENTS)
+    browser = Browser()
+    browser.new_tab(URL(sys.argv[1]))
+    browser.draw()
+    mainloop(browser)
     
 
     
