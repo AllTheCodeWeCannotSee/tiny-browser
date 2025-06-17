@@ -38,7 +38,7 @@ INHERITED_PROPERTIES = {
     "font-weight": "normal",
     "color": "black",
 }
-
+COOKIE_JAR = {}
 
 class URL:
     def __str__(self):
@@ -172,9 +172,6 @@ class URL:
         s.close()
         return response_headers, content
 
-COOKIE_JAR = {}
-
-
 class Task:
     def __init__(self, task_code, *args):
         self.task_code = task_code
@@ -212,8 +209,6 @@ class TaskRunner:
         if len(self.tasks) == 0:
             self.condition.wait()
         self.condition.release()
-
-
 
 
 class CSSParser:
@@ -371,7 +366,7 @@ def tree_to_list(tree, list):
 DEFAULT_STYLE_SHEET = CSSParser(open("browser.css").read()).parse()
 
 
-
+REFRESH_RATE_SEC = .033
 
 class Chrome:
     '''
@@ -556,6 +551,8 @@ def mainloop(browser):
                 browser.handle_key(event.text.text.decode('utf8'))
         
         browser.active_tab.task_runner.run()
+        browser.raster_and_draw()
+        browser.schedule_animation_frame()
 
  
  
@@ -571,7 +568,6 @@ NAMED_COLORS = {
     "orange": "#ffa500",
     "orangered": "#ff4500",
 }
-
 
 def parse_color(color):
     if color.startswith("#") and len(color) == 7:
@@ -589,14 +585,13 @@ def parse_color(color):
         return parse_color(NAMED_COLORS[color])
     else:
         return skia.ColorBLACK
-
-    
-              
+           
 class Browser:
     '''
         管理键盘事件（Tab管理鼠标）
     '''
     def __init__(self):
+        self.animation_timer = None
         self.chrome = Chrome(self)
         # sdl
         self.sdl_window = sdl2.SDL_CreateWindow(b"Browser",
@@ -633,7 +628,24 @@ class Browser:
             self.GREEN_MASK = 0x0000ff00
             self.BLUE_MASK = 0x00ff0000
             self.ALPHA_MASK = 0xff000000
+       
+       
+    def schedule_animation_frame(self):
+        # 每33ms触发一次渲染
+        def callback():
+            active_tab = self.active_tab
+            task =Task(active_tab.render)
+            active_tab.task_runner.schedule_task(task)
+            self.animation_timer = None
+        if not self.animation_timer:
+            self.animation_timer = threading.Timer(REFRESH_RATE_SEC, callback)
+            self.animation_timer.start()
         
+    
+    def raster_and_draw(self):
+        self.raster_chrome()
+        self.raster_tab()
+        self.draw() 
     
     def handle_quit(self):
         sdl2.SDL_DestroyWindow(self.sdl_window)
@@ -770,9 +782,7 @@ class Browser:
         self.raster_tab()
         
         self.draw()
-        
-    
-        
+             
 class Tab:
     def __init__(self, tab_height):
         
@@ -1674,7 +1684,6 @@ class DrawRect:
         )
         canvas.drawRect(self.rect, paint)
 
-
 class Rect:
     def __init__(self, left, top, right, bottom):
         self.left = left
@@ -1728,9 +1737,6 @@ class DrawRRect:
         )
         canvas.drawRRect(self.rrect, paint)
 
-
-
-
 class Blend:
     def __init__(self, opacity, blend_mode, children):
         self.opacity = opacity
@@ -1754,9 +1760,6 @@ class Blend:
         if self.should_save:
             canvas.restore()
 
-
-
-
 def parse_blend_mode(blend_mode_str):
     if blend_mode_str == "multiply":
         return skia.BlendMode.kMultiply
@@ -1768,7 +1771,6 @@ def parse_blend_mode(blend_mode_str):
         return skia.BlendMode.kSrcOver
     else:
         return skia.BlendMode.kSrcOver
-
 
 def linespace(font):
     '''
@@ -1787,9 +1789,7 @@ def paint_tree(layout_object, display_list):
     if layout_object.should_paint():
         cmds = layout_object.paint_effects(cmds)
     display_list.extend(cmds)
-
-
-        
+    
 def parseHttp(url):
     if "/" not in url:
         url += "/"
