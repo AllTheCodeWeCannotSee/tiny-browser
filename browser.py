@@ -591,6 +591,11 @@ class Browser:
         管理键盘事件（Tab管理鼠标）
     '''
     def __init__(self):
+        
+        self.lock = threading.Lock()
+        # 脏位
+        self.needs_raster_and_draw = False
+        
         self.animation_timer = None
         self.chrome = Chrome(self)
         # sdl
@@ -629,6 +634,8 @@ class Browser:
             self.BLUE_MASK = 0x00ff0000
             self.ALPHA_MASK = 0xff000000
        
+    def set_needs_raster_and_draw(self):
+        self.needs_raster_and_draw = True
        
     def schedule_animation_frame(self):
         # 每33ms触发一次渲染
@@ -643,9 +650,15 @@ class Browser:
         
     
     def raster_and_draw(self):
+        # 如果不需要 raster_and_draw
+        if not self.needs_raster_and_draw: return 
+        
+        
         self.raster_chrome()
         self.raster_tab()
         self.draw() 
+        
+        self.needs_raster_and_draw = False
     
     def handle_quit(self):
         sdl2.SDL_DestroyWindow(self.sdl_window)
@@ -728,63 +741,68 @@ class Browser:
         
         
     def handle_enter(self):
-        if self.chrome.focus:
-            self.chrome.enter()
-            self.raster_tab()
-            self.raster_chrome()
-            self.draw()
+        self.lock.acquire(blocking=True)
+        if self.chrome.enter():
+            self.set_needs_raster_and_draw()
+        self.lock.release()
+
         
     def handle_key(self, char):
+        self.lock.acquire(blocking=True)
         if not (0x20 <= ord(char) < 0x7f): return
-        if self.chrome.focus:
-            self.chrome.keypress(char)
-            self.raster_chrome()
-            self.draw()
+
+        if self.chrome.keypress(char):
+            self.set_needs_raster_and_draw()
         elif self.focus == "content":
-            self.active_tab.keypress(char)
-            self.raster_tab()
-            self.draw()
+            task = Task(self.active_tab.keypress, char)
+            self.active_tab.task_runner.schedule_task(task)
+        self.lock.release()
         
         
     def handle_down(self):
-        self.active_tab.scrolldown()
-        self.draw()
+        self.lock.acquire(blocking=True)
+        if not self.active_tab_height:
+            self.lock.release()
+            return
+        self.active_tab_scroll = self.clamp_scroll(
+            self.active_tab_scroll + SCROLL_STEP)
+        self.set_needs_raster_and_draw()
+        self.needs_animation_frame = True
+        self.lock.release()
         
-    def handle_up(self):
-        self.active_tab.scrollup()
-        self.draw()
         
     def handle_click(self, e):
+        self.lock.acquire(blocking=True)
         if e.y < self.chrome.bottom:
             self.focus = None
             self.chrome.click(e.x, e.y)
-            self.raster_chrome()
+            self.set_needs_raster_and_draw()
         else:
             if self.focus != "content":
                 self.focus = "content"
                 self.chrome.blur()
-                self.raster_chrome()
-            url = self.active_tab.url
+                self.self.set_needs_raster_and_draw()
+            self.chrome.blur()
+            
             tab_y = e.y - self.chrome.bottom
-            self.active_tab.click(e.x, tab_y)
-            if self.active_tab.url != url:
-                self.raster_chrome()
-            self.raster_tab()
-        self.draw()
+            task = Task(self.active_tab.click, e.x, tab_y)
+            self.active_tab.task_runner.schedule_task(task)
+        self.lock.release()
         
     def new_tab(self, url):
-        new_tab = Tab(HEIGHT - self.chrome.bottom)
-        new_tab.load(url)
+        self.lock.acquire(blocking=True)
+        self.new_tab_internal(url)
+        self.lock.release()
+    def new_tab_internal(self, url):
+        new_tab = Tab(self, HEIGHT - self.chrome.bottom)
         self.tabs.append(new_tab)
-        self.active_tab = new_tab
-        
-        self.raster_chrome()
-        self.raster_tab()
-        
-        self.draw()
-             
+        self.set_active_tab(new_tab)
+        self.schedule_load(url)       
+    
 class Tab:
-    def __init__(self, tab_height):
+    def __init__(self, browser, tab_height):
+        
+        self.browser = browser
         
         self.scroll = 0
         self.url = None # URL对象
@@ -796,7 +814,15 @@ class Tab:
         # foucs node
         self.focus = None
         
+        self.js = None
+        
         self.task_runner = TaskRunner(self)
+        
+        # 脏位
+        self.needs_render = False
+    
+    def set_needs_render(self):
+        self.needs_render = True
       
     def allowed_request(self, url):
         return self.allowed_origins == None or \
@@ -812,7 +838,7 @@ class Tab:
         if self.focus:
             if self.js.dispatch_event("keydown", self.focus): return
             self.focus.attributes["value"] += char
-            self.render()
+            self.set_needs_render()
 
     # 处理点击，包含点击链接    
     def click(self, x, y):
@@ -820,6 +846,10 @@ class Tab:
             渲染是从元素到布局对象，再到页面坐标，最后到屏幕坐标；
             而点击处理则相反，从屏幕坐标开始，转换为页面坐标，布局对象，最后是元素
         '''
+        
+        # 处理点击事件前，确保布局树是最新状态
+        self.render()
+        
         if self.focus:
             self.focus.is_focused = False
         self.focus = None
@@ -853,7 +883,7 @@ class Tab:
                 elt.attributes["value"] = ""
                 self.focus = elt
                 elt.is_focused = True
-                return self.render()
+                return self.set_needs_render()
             elif elt.tag == "button":
                 if self.js.dispatch_event("click", elt): return
                 while elt:
@@ -863,7 +893,6 @@ class Tab:
             
             elt = elt.parent
         
-        self.render()
       
     def submit_form(self, elt):
         if self.js.dispatch_event("submit", elt): return
@@ -967,9 +996,10 @@ class Tab:
             self.rules.extend(CSSParser(body).parse())
         
         # 将原本[加载页面, 样式计算, 布局, 绘制, 显示] 中的 [样式计算, 布局, 绘制, 显示] 放到 render()
-        self.render()
+        self.set_needs_render()
         
     def render(self):
+        if not self.needs_render: return 
         # 第2次遍历：生成 style tree
         style(self.nodes, sorted(self.rules, key=cascade_priority))
         
@@ -980,6 +1010,12 @@ class Tab:
         # 第4次遍历：生成绘制列表 (Painting)
         self.display_list = []
         paint_tree(self.document, self.display_list)
+        
+        # 渲染完后
+        self.needs_render = False
+        
+        self.browser.set_needs_raster_and_draw()
+
    
 RUNTIME_JS = open("runtime.js").read()
 EVENT_DISPATCH_JS = "new Node(dukpy.handle).dispatchEvent(new Event(dukpy.type))"
@@ -1084,7 +1120,7 @@ class JSContext:
         elt.children = new_nodes
         for child in elt.children:
             child.parent = elt
-        self.tab.render()
+        self.tab.set_needs_render()
 
 
     def dispatch_event(self, type, elt):
