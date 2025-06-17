@@ -48,14 +48,13 @@ Node.prototype.getAttribute = function (attr) {
  *   // ... 其他节点的监听器
  * };
  */
-LISTENERS = {};
 
 // 事件对象
+LISTENERS = {};
 function Event(type) {
   this.type = type;
   this.do_default = true;
 }
-
 Event.prototype.preventDefault = function () {
   this.do_default = false;
 };
@@ -104,29 +103,8 @@ Object.defineProperty(Node.prototype, "innerHTML", {
   },
 });
 
-// XMLHttpRequest 跨站请求
-// x = new XMLHttpRequest();
-// x.open("GET", url, false);
-// x.send();
-function XMLHttpRequest() {}
-
-XMLHttpRequest.prototype.open = function (method, url, is_async) {
-  if (is_async) throw Error("Asynchronous XHR is not supported");
-  this.method = method;
-  this.url = url;
-};
-
-XMLHttpRequest.prototype.send = function (body) {
-  this.responseText = call_python(
-    "XMLHttpRequest_send",
-    this.method,
-    this.url,
-    body
-  );
-};
-
+// setTimeout
 SET_TIMEOUT_REQUESTS = {};
-
 function setTimeout(callback, time_delta) {
   var handle = Object.keys(SET_TIMEOUT_REQUESTS).length;
   SET_TIMEOUT_REQUESTS[handle] = callback;
@@ -136,4 +114,42 @@ function setTimeout(callback, time_delta) {
 function __runSetTimeout(handle) {
   var callback = SET_TIMEOUT_REQUESTS[handle];
   callback();
+}
+
+// XMLHttpRequest 跨站请求
+// x = new XMLHttpRequest();
+// x.open("GET", url, false);
+// x.send(body);
+
+XHR_REQUESTS = {};
+
+function XMLHttpRequest() {
+  this.handle = Object.keys(XHR_REQUESTS).length;
+  XHR_REQUESTS[this.handle] = this;
+}
+
+XMLHttpRequest.prototype.open = function (method, url, is_async) {
+  this.method = method;
+  this.url = url;
+  this.is_async = is_async;
+};
+
+XMLHttpRequest.prototype.send = function (body) {
+  this.responseText = call_python(
+    "XMLHttpRequest_send",
+    this.method,
+    this.url,
+    body,
+    this.is_async,
+    this.handle
+  );
+};
+
+function __runXHROnload(body, handle) {
+  var obj = XHR_REQUESTS[handle];
+  obj.responseText = body;
+  var evt = new Event("load");
+  if (obj.onload) {
+    obj.onload(evt);
+  }
 }
