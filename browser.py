@@ -10,6 +10,8 @@ import sdl2
 import skia
 import math
 
+import threading
+
 WIDTH, HEIGHT = 800, 600
 SCROLL_STEP = 100
 HSTEP, VSTEP = 13, 18
@@ -171,6 +173,48 @@ class URL:
         return response_headers, content
 
 COOKIE_JAR = {}
+
+
+class Task:
+    def __init__(self, task_code, *args):
+        self.task_code = task_code
+        self.args = args
+    def run(self):
+        self.task_code(*self.args)
+        self.task_code = None
+        self.args = None
+
+class TaskRunner:
+    def __init__(self, tab):
+        self.tab = tab
+        self.tasks = []
+        self.condition = threading.Condition()
+        
+    def schedule_task(self, task):
+        self.condition.acquire(blocking=True)
+        
+        self.tasks.append(task)
+        
+        self.condition.notify()
+        self.condition.release()
+        
+    def run(self):
+        task = None
+        if len(self.tasks) > 0:
+            self.condition.acquire(blocking=True)            
+            task = self.tasks.pop(0)
+            self.condition.release()
+
+            if task:
+                task.run()
+        
+        self.condition.acquire(blocking=True)
+        if len(self.tasks) == 0:
+            self.condition.wait()
+        self.condition.release()
+
+
+
 
 class CSSParser:
     def __init__(self,s):
@@ -510,6 +554,9 @@ def mainloop(browser):
                     browser.handle_down()
             elif event.type == sdl2.SDL_TEXTINPUT:
                 browser.handle_key(event.text.text.decode('utf8'))
+        
+        browser.active_tab.task_runner.run()
+
  
  
 NAMED_COLORS = {
@@ -728,6 +775,7 @@ class Browser:
         
 class Tab:
     def __init__(self, tab_height):
+        
         self.scroll = 0
         self.url = None # URL对象
         self.tab_height = tab_height
@@ -737,6 +785,8 @@ class Tab:
         
         # foucs node
         self.focus = None
+        
+        self.task_runner = TaskRunner(self)
       
     def allowed_request(self, url):
         return self.allowed_origins == None or \
@@ -861,7 +911,9 @@ class Tab:
         # 第1次遍历：生成 node tree
         self.nodes = HTMLParser(body).parse()
         
+        
         # js
+        if self.js: self.js.discarded = True
         self.js = JSContext(self)
         # 找到所有 JS 的 url(string)
         scripts = [node.attributes["src"] for node
@@ -881,7 +933,11 @@ class Tab:
                 header, body = script_url.request(url)
             except:
                 continue
-            self.js.run(script, body)
+            
+            # 放入任务队列
+            task = Task(self.js.run, script_url, body)
+            self.task_runner.schedule_task(task)
+
 
         
         # 获取 css 文件
@@ -917,7 +973,7 @@ class Tab:
    
 RUNTIME_JS = open("runtime.js").read()
 EVENT_DISPATCH_JS = "new Node(dukpy.handle).dispatchEvent(new Event(dukpy.type))"
-
+SETTIMEOUT_JS = "__runSetTimeout(dukpy.handle)"
 
 class JSContext:
     def __init__(self, tab):
@@ -935,8 +991,23 @@ class JSContext:
         self.interp.export_function("getAttribute", self.getAttribute)
         self.interp.export_function("innerHTML_set", self.innerHTML_set)
         self.interp.export_function("XMLHttpRequest_send", self.XMLHttpRequest_send)
+        self.interp.export_function("setTimeout", self.setTimeout)
         
         self.interp.evaljs(RUNTIME_JS)
+        self.discarded = False
+    
+    
+    def dispatch_settimeout(self, handle):
+        if self.discarded: return
+        self.interp.evaljs(SETTIMEOUT_JS, handle=handle)
+        
+    def setTimeout(self, handle, time):
+        def run_callback():
+            task = Task(self.dispatch_settimeout, handle)
+            self.tab.task_runner.schedule_task(task)
+        threading.Timer(time / 1000.0, run_callback).start()
+        
+    
     
     def XMLHttpRequest_send(self, method, url, body):
         full_url = self.tab.url.resolve(url)
