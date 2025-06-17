@@ -592,6 +592,9 @@ class Browser:
     '''
     def __init__(self):
         
+        # 脏位 标记是否需要render（后台的tab不需要）
+        self.needs_animation_frame = True
+        
         self.lock = threading.Lock()
         # 脏位
         self.needs_raster_and_draw = False
@@ -634,6 +637,13 @@ class Browser:
             self.BLUE_MASK = 0x00ff0000
             self.ALPHA_MASK = 0xff000000
        
+    def set_needs_animation_frame(self, tab):
+        '''
+            后台的tab不需要render
+        '''
+        if tab == self.active_tab:
+            self.needs_animation_frame = True
+    
     def set_needs_raster_and_draw(self):
         self.needs_raster_and_draw = True
        
@@ -644,7 +654,7 @@ class Browser:
             task =Task(active_tab.render)
             active_tab.task_runner.schedule_task(task)
             self.animation_timer = None
-        if not self.animation_timer:
+        if self.needs_animation_frame and not self.animation_timer:
             self.animation_timer = threading.Timer(REFRESH_RATE_SEC, callback)
             self.animation_timer.start()
         
@@ -820,6 +830,8 @@ class Tab:
         
         # 脏位
         self.needs_render = False
+
+        
     
     def set_needs_render(self):
         self.needs_render = True
@@ -1000,6 +1012,8 @@ class Tab:
         
     def render(self):
         if not self.needs_render: return 
+        # 在渲染前 处理RAF
+        self.js.interp.evaljs("__runRAFHandlers()")
         # 第2次遍历：生成 style tree
         style(self.nodes, sorted(self.rules, key=cascade_priority))
         
@@ -1039,11 +1053,15 @@ class JSContext:
         self.interp.export_function("innerHTML_set", self.innerHTML_set)
         self.interp.export_function("XMLHttpRequest_send", self.XMLHttpRequest_send)
         self.interp.export_function("setTimeout", self.setTimeout)
-        
+        self.interp.export_function("requestAnimationFrame", self.requestAnimationFrame)
+
         self.interp.evaljs(RUNTIME_JS)
         self.discarded = False
     
-    
+    #RAF
+    def requestAnimationFrame(self):
+        self.tab.browser.set_needs_animation_frame(self.tab)
+
     # xhr
     def XMLHttpRequest_send(self, method, url, body, isasync, handle):
         full_url = self.tab.url.resolve(url)

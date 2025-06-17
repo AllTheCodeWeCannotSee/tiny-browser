@@ -153,3 +153,18 @@ function __runXHROnload(body, handle) {
     obj.onload(evt);
   }
 }
+
+// requestAnimationFrame
+RAF_LISTENERS = [];
+function requestAnimationFrame(fn) {
+  RAF_LISTENERS.push(fn);
+  call_python("requestAnimationFrame");
+}
+
+function __runRAFHandlers() {
+  var handles_copy = RAF_LISTENERS;
+  RAF_LISTENERS = [];
+  for (var i = 0; i < handles_copy.length; i++) {
+    handles_copy[i]();
+  }
+}
