@@ -1,6 +1,7 @@
 import socket
 import ssl
 import tkinter
+import tkinter.font
 
 # ---------------------------------- URL --------------------------------- #
 # url -> text body
@@ -67,27 +68,42 @@ class URL:
 # text body -> node tree
 
 def lex(text):
-    # <div>hello<p>world</p></div>
-    # hello word
-    content = ""
-    word = ""
-    intag = False
+    # in: <div>hello<p>world? world!</p></div>
+    # out: [Tag(div), Text(hello), Tag(p), Text(world? world!), Tag(/p), Tag(/div)]
+    content = []
+    buffer = ""
+
     for c in text:
         if c == '<':
-            intag = True
-            content += word
-            content += " "
-            word = ""
+            if buffer:
+                content.append(Text(buffer))
+            buffer = ""
         elif c == '>':
-            intag = False
-        elif intag:
-            pass
+            if buffer:
+                content.append(Tag(buffer))
+                buffer = ""
         else:
-            word += c
+            buffer += c
+    
+    if buffer:
+        content.append(Text(buffer)) 
     return content
         
-        
+class Text:
+    def __init__(self, text):
+        self.text = text
+     
+class Tag:
+    def __init__(self, tag):
+        self.tag = tag         
 
+def paint_tokens(tokens):
+    for tok in tokens:
+        if isinstance(tok, Text):
+            print("text:", tok.text)
+        elif isinstance(tok, Tag):
+            print("tag:", tok.tag)
+            
 
 # ---------------------------------- CSS --------------------------------- #
 # css text -> styled tree
@@ -95,21 +111,52 @@ def lex(text):
 
 # ---------------------------------- Layout --------------------------------- #
 # styled tree -> layout tree
+# in: [Tag(div), Text(hello), Tag(i), Text(world? world!)]
+# out: [(x, y, hello, font), (x, y, world, font), (x, y, ?, font), (x, y, world, font), (x, y, !, font)]
 
 
 HSTEP = 13
 VSTEP = 18
-def layout(content):
-    display_list = []
-    cursor_x, cursor_y = HSTEP, VSTEP
-    
-    for c in content:
-        if cursor_x + HSTEP > WIDTH:
-            cursor_x = HSTEP
-            cursor_y += VSTEP
-        cursor_x += HSTEP
-        display_list.append((cursor_x, cursor_y, c))
-    return display_list
+class Layout:
+    def __init__(self, tokens):
+        self.tokens = tokens
+        self.display_list = []
+        self.cursor_x = HSTEP
+        self.cursor_y = VSTEP
+        
+        self.size = 12
+        self.weight = "normal"
+        self.style = "roman"
+        
+        for tok in tokens:
+            self.token(tok)
+    def token(self, tok):
+        if isinstance(tok, Text):
+            text = tok.text.split()
+            for word in text:
+                self.word(word)
+        elif isinstance(tok, Tag):
+            if tok.tag == "i":
+                self.style = "italic"
+            elif tok.tag == '/i':
+                self.style = "roman"
+ 
+            
+    def word(self, word):
+        font = tkinter.font.Font(
+            size=self.size,
+            weight=self.weight,
+            slant=self.style,
+        )
+        w = font.measure(word)
+        
+        if self.cursor_x + w < WIDTH:
+            pass
+        else:
+            self.cursor_x = HSTEP
+            self.cursor_y += VSTEP
+        self.display_list.append((self.cursor_x, self.cursor_y, word, font))
+        self.cursor_x += w + HSTEP
 
 
 
@@ -146,24 +193,22 @@ class Browser:
     
     def load(self, url):
         headers, body = url.request()
+        # token 序列
         content = lex(body)
-        self.display_list = layout(content)
+        self.display_list = Layout(content).display_list
         self.draw()
     
     def draw(self):
         self.canvas.delete("all")
-        for cursor_x, cursor_y, word in self.display_list:
+        for cursor_x, cursor_y, word, font in self.display_list:
 
             self.canvas.create_text(
                 cursor_x,
                 cursor_y - self.scroll,
-                text=word)
-        
-        
-        
-
-
-
+                text=word,
+                font=font,
+                anchor="nw",
+                )
 
 if __name__ == '__main__':
     import sys
@@ -171,6 +216,8 @@ if __name__ == '__main__':
     browser = Browser()
     browser.load(url)
     browser.window.mainloop()
+    
+
     
     
     
