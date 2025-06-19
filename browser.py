@@ -1124,7 +1124,6 @@ class MeasureTime:
         self.file.close()
         self.lock.release()
 
-# done
 class Task:
     def __init__(self, task_code, *args):
         self.task_code = task_code
@@ -1133,7 +1132,7 @@ class Task:
         self.task_code(*self.args)
         self.task_code = None
         self.args = None
-# done
+
 class TaskRunner:
     def __init__(self, tab):
         self.condition = threading.Condition()
@@ -1199,7 +1198,6 @@ class CommitData:
         self.scroll = scroll
         self.display_list = display_list
 
-# done
 class JSContext:
     '''
         为每个浏览器标签页（Tab）创建一个独立的 JavaScript 执行环境
@@ -1623,8 +1621,6 @@ class Browser:
         sdl2.SDL_BlitSurface(sdl_surface, rect, window_surface, rect)
         sdl2.SDL_UpdateWindowSurface(self.sdl_window)
         
-
- 
 class Chrome:
     '''
         浏览器上的工具栏，除了显示的网页外的内容
