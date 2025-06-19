@@ -1,6 +1,8 @@
 import socket
 import ssl
+import tkinter
 
+# ---------------------------------- URL --------------------------------- #
 # url -> text body
 class URL:
     # url -> schema, host, port
@@ -61,19 +63,123 @@ class URL:
 
         return headers, content
         
+# ---------------------------------- HTML --------------------------------- #
 # text body -> node tree
 
+def lex(text):
+    # <div>hello<p>world</p></div>
+    # hello word
+    content = ""
+    word = ""
+    intag = False
+    for c in text:
+        if c == '<':
+            intag = True
+            content += word
+            content += " "
+            word = ""
+        elif c == '>':
+            intag = False
+        elif intag:
+            pass
+        else:
+            word += c
+    return content
+        
+        
+
+
+# ---------------------------------- CSS --------------------------------- #
 # css text -> styled tree
 
+
+# ---------------------------------- Layout --------------------------------- #
 # styled tree -> layout tree
+
+
+HSTEP = 13
+VSTEP = 18
+def layout(content):
+    display_list = []
+    cursor_x, cursor_y = HSTEP, VSTEP
+    
+    for c in content:
+        if cursor_x + HSTEP > WIDTH:
+            cursor_x = HSTEP
+            cursor_y += VSTEP
+        cursor_x += HSTEP
+        display_list.append((cursor_x, cursor_y, c))
+    return display_list
+
+
+
+# ---------------------------------- Paint --------------------------------- #
+
+
+    
+
+
+# ---------------------------------- Browser --------------------------------- #
+
+WIDTH = 800
+HEIGHT = 600
+SCROLL_STEP = 100
+
+class Browser:
+    def __init__(self):
+        self.scroll = 0
+        self.display_list = []
+        self.window = tkinter.Tk()
+        self.canvas = tkinter.Canvas(
+            self.window,
+            width=WIDTH,
+            height=HEIGHT
+        )
+        self.canvas.pack()
+        
+        self.window.bind("<Down>", self.scrolldown)
+    
+    def scrolldown(self, event):
+        self.scroll += SCROLL_STEP
+        self.draw()
+        
+    
+    def load(self, url):
+        headers, body = url.request()
+        content = lex(body)
+        self.display_list = layout(content)
+        self.draw()
+    
+    def draw(self):
+        self.canvas.delete("all")
+        for cursor_x, cursor_y, word in self.display_list:
+
+            self.canvas.create_text(
+                cursor_x,
+                cursor_y - self.scroll,
+                text=word)
+        
+        
+        
+
+
 
 
 if __name__ == '__main__':
     import sys
     url = URL(sys.argv[1])
-    headers, content =url.request()
-    print(headers)
-    print(content)
+    browser = Browser()
+    browser.load(url)
+    browser.window.mainloop()
+    
+    
+    
+
+
+    
+
+    
+
 
     
 
