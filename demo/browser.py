@@ -66,44 +66,115 @@ class URL:
         
 # ---------------------------------- HTML --------------------------------- #
 # text body -> node tree
-
-def lex(text):
-    # in: <div>hello<p>world? world!</p></div>
-    # out: [Tag(div), Text(hello), Tag(p), Text(world? world!), Tag(/p), Tag(/div)]
-    content = []
-    buffer = ""
-
-    for c in text:
-        if c == '<':
-            if buffer:
-                content.append(Text(buffer))
-            buffer = ""
-        elif c == '>':
-            if buffer:
-                content.append(Tag(buffer))
-                buffer = ""
-        else:
-            buffer += c
+SELF_CLOSING_TAGS=[
+            "area", "base", "br", "col", "embed", "hr", "img", "input",
+            "link", "meta", "param", "source", "track", "wbr",
+        ]
+class HTMLParser:
+    '''
+        in: <div>hello<p>world? world!</p></div>
+        out: Element(div)
+    '''
+    def __init__(self, body):
+        self.body = body.strip()
+        self.root = None
+        self.unfinished = []
     
-    if buffer:
-        content.append(Text(buffer)) 
-    return content
+    def get_attributes(self, text):
+        '''
+            解析属性
+        '''
+        parts = text.split()
+        tag = parts[0].casefold()
+        attributes = {}
+        for attrpair in parts[1:]:
+            if "=" in attrpair:
+                key, value = attrpair.split("=", 1)
+                if len(value) > 2 and value[0] in ["'", "\""]:
+                    value = value[1:-1]
+                attributes[key.casefold()] = value
+            else:
+                attributes[attrpair.casefold()] = ""
+        return tag, attributes
+
+    def parse(self):
+        """
+        执行解析过程。
+        - 采用简单的状态机逻辑，逐字符解析。
+        - 正确处理标签的嵌套和闭合。
+        - 忽略注释和 Doctype 等复杂结构。
+        """
+        buffer = ""
+        in_tag = False # 一个简单的状态标志，表示当前是否在 < > 内部
+
+        for char in self.body:
+            if char == '<':
+                # 进入标签模式前，如果 buffer 中有内容，说明是文本节点
+                if buffer and self.unfinished:
+                    parent = self.unfinished[-1]
+                    text_node = Text(buffer)
+                    text_node.parent = parent
+                    parent.children.append(text_node)
+                buffer = "" # 清空 buffer，准备接收标签名
+                in_tag = True
+            elif char == '>':
+                # 退出标签模式，此时 buffer 中的内容是完整的标签名
+                in_tag = False
+                tag_name = buffer.strip()
+
+                if not tag_name: continue # 处理 <> 这种情况
+                tag_name, attributes = self.get_attributes(tag_name)
+
+                # 判断是开始标签还是结束标签
+                if tag_name.startswith('/'):
+                    # 结束标签，例如 </p>
+                    # 理想情况下，我们应该检查它是否与栈顶标签匹配
+                    # if self.unfinished and self.unfinished[-1].tag == tag_name[1:]:
+                    if self.unfinished:
+                        self.unfinished.pop() # 从堆栈中弹出一个开放的标签
+                elif tag_name in SELF_CLOSING_TAGS:
+                    parent = self.unfinished[-1]
+                    node = Element(tag_name)
+                    parent.children.append(node)
+                else:
+                    # 开始标签，例如 <p>
+                    element_node = Element(tag_name)
+                    
+                    if not self.root:
+                        # 如果还没有根节点，那么这就是根节点
+                        self.root = element_node
+                    
+                    if self.unfinished:
+                        # 将新节点作为当前开放标签的子节点
+                        parent = self.unfinished[-1]
+                        element_node.parent = parent
+                        parent.children.append(element_node)
+                    
+                    # 将新节点压入堆栈，因为它现在是一个开放的标签
+                    self.unfinished.append(element_node)
+
+                buffer = "" # 清空 buffer
+            else:
+                # 不在 < > 之间，或者在 < > 之间，都统一追加到 buffer
+                buffer += char
         
+        # 返回构建好的树的根节点
+        return self.root
+     
 class Text:
     def __init__(self, text):
         self.text = text
-     
-class Tag:
-    def __init__(self, tag):
-        self.tag = tag         
+        self.children = []
+        self.parent = None
 
-def paint_tokens(tokens):
-    for tok in tokens:
-        if isinstance(tok, Text):
-            print("text:", tok.text)
-        elif isinstance(tok, Tag):
-            print("tag:", tok.tag)
-            
+class Element:
+    def __init__(self, tag):
+        self.tag = tag
+        self.children = []
+        self.parent = None
+        
+
+         
 
 # ---------------------------------- CSS --------------------------------- #
 # css text -> styled tree
@@ -118,8 +189,9 @@ def paint_tokens(tokens):
 HSTEP = 13
 VSTEP = 18
 class Layout:
-    def __init__(self, tokens):
-        self.tokens = tokens
+    def __init__(self, tree):
+        self.tree = tree
+        self.line = []
         self.display_list = []
         self.cursor_x = HSTEP
         self.cursor_y = VSTEP
@@ -128,19 +200,42 @@ class Layout:
         self.weight = "normal"
         self.style = "roman"
         
-        for tok in tokens:
-            self.token(tok)
-    def token(self, tok):
-        if isinstance(tok, Text):
-            text = tok.text.split()
-            for word in text:
+        self.rescurse(self.tree)
+    
+    def open_tag(self, tag):
+        if tag == "i":
+            self.style = "italic"
+        elif tag == "b":
+            self.weight = "bold"
+        elif tag == "br":
+            self.flush()
+
+
+
+            
+    def close_tag(self, tag):
+        if tag == "i":
+            self.style = "roman"
+        elif tag == "b":
+            self.weight = "normal"
+        elif tag == "p":
+            self.flush()
+            self.cursor_y += VSTEP
+    
+    
+        
+    
+    def rescurse(self, tree):
+        if isinstance(tree, Text):
+            for word in tree.text.split():
                 self.word(word)
-        elif isinstance(tok, Tag):
-            if tok.tag == "i":
-                self.style = "italic"
-            elif tok.tag == '/i':
-                self.style = "roman"
- 
+        else:
+            self.open_tag(tree.tag)
+
+            for child in tree.children:
+                self.rescurse(child)
+            self.close_tag(tree.tag)
+            
             
     def word(self, word):
         font = tkinter.font.Font(
@@ -150,15 +245,27 @@ class Layout:
         )
         w = font.measure(word)
         
-        if self.cursor_x + w < WIDTH:
-            pass
-        else:
-            self.cursor_x = HSTEP
-            self.cursor_y += VSTEP
-        self.display_list.append((self.cursor_x, self.cursor_y, word, font))
-        self.cursor_x += w + HSTEP
+        if self.cursor_x + w > WIDTH - HSTEP:
+            self.flush()
 
+        self.line.append((self.cursor_x, word, font))
+        self.cursor_x += w + font.measure(" ")
+    
 
+    def flush(self):
+        if not self.line: return
+        metrics = [font.metrics() for x, word, font in self.line]
+        max_ascent = max([metric["ascent"] for metric in metrics])
+        baseline = self.cursor_y + 1.25 * max_ascent
+        for x, word, font in self.line:
+            y = baseline - font.metrics("ascent")
+            self.display_list.append((x, y, word, font))
+
+        self.cursor_y += font.metrics("linespace") * 1.25
+        self.cursor_x = HSTEP
+        self.line = []
+        
+        
 
 # ---------------------------------- Paint --------------------------------- #
 
@@ -194,8 +301,8 @@ class Browser:
     def load(self, url):
         headers, body = url.request()
         # token 序列
-        content = lex(body)
-        self.display_list = Layout(content).display_list
+        self.nodes = HTMLParser(body).parse()
+        self.display_list = Layout(self.nodes).display_list
         self.draw()
     
     def draw(self):
