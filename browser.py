@@ -190,6 +190,28 @@ class URL:
         content = response.read()
         s.close()
         return response_headers, content
+def parseHttp(url):
+    if "/" not in url:
+        url += "/"
+    host, path = url.split('/', 1)
+    if ":" in host:
+            host, port = host.split(":", 1)
+    else:
+        port = 80
+    path = "/" + path
+    return host, int(port), path
+def parseHttps(url):
+    if "/" not in url:
+        url += "/"
+    host, path = url.split('/', 1)
+    if ":" in host:
+            host, port = host.split(":", 1)
+    else:
+        port = 443
+    path = "/" + path
+    return host, int(port), path
+def parseFile(url):
+    return None, None, url
 
 # ---------------------------------- HTML Parser --------------------------------- #
 class Text:
@@ -332,27 +354,7 @@ def tree_to_list(tree, list):
     for child in tree.children:
         tree_to_list(child, list)
     return list
-def parseHttp(url):
-    if "/" not in url:
-        url += "/"
-    host, path = url.split('/', 1)
-    if ":" in host:
-            host, port = host.split(":", 1)
-    else:
-        port = 80
-    path = "/" + path
-    return host, int(port), path
-def parseHttps(url):
-    if "/" not in url:
-        url += "/"
-    host, path = url.split('/', 1)
-    if ":" in host:
-            host, port = host.split(":", 1)
-    else:
-        port = 443
-    path = "/" + path
-    return host, int(port), path
-def parseFile(url):
+
     return None, None, url
 
 # ---------------------------------- CSS Parser --------------------------------- #
